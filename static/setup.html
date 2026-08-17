@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Первый вход — НейроМастер</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f7fa;
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 14px;
+            box-shadow: 0 4px 20px rgba(15, 23, 42, 0.08);
+            padding: 32px;
+            width: 380px;
+        }
+        h1 { font-size: 20px; color: #0f172a; margin: 0 0 4px; }
+        .subtitle { color: #64748b; font-size: 14px; margin-bottom: 20px; }
+        .note {
+            background: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            color: #1e40af;
+            padding: 10px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+        label { display: block; font-size: 13px; color: #475569; margin-bottom: 5px; }
+        .hint { font-size: 12px; color: #94a3b8; margin: -12px 0 16px; }
+        input {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 15px;
+            margin-bottom: 16px;
+            font-family: inherit;
+        }
+        button {
+            width: 100%;
+            padding: 11px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            cursor: pointer;
+        }
+        button:hover { background: #2563eb; }
+        button:disabled { background: #94a3b8; cursor: not-allowed; }
+        .error {
+            color: #b91c1c;
+            background: #fee2e2;
+            border-radius: 8px;
+            padding: 10px 12px;
+            font-size: 14px;
+            margin-bottom: 14px;
+            display: none;
+        }
+    </style>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="auth-page">
+    <form class="card auth-card" id="setup-form">
+        <h1>🧠 Первый вход</h1>
+        <div class="subtitle" id="greeting">Задайте свои логин и пароль</div>
+
+        <div class="note">
+            Вы вошли по данным, выданным при установке системы. Замените их своими —
+            выданные логин и пароль перестанут действовать сразу после сохранения.
+        </div>
+
+        <div class="error" id="error"></div>
+
+        <label for="username">Новый логин</label>
+        <input type="text" id="username" autocomplete="username" required>
+        <div class="hint">Латинские буквы, цифры, точка, дефис, подчёркивание. От 3 символов.</div>
+
+        <label for="password">Новый пароль</label>
+        <input type="password" id="password" autocomplete="new-password" required>
+        <div class="hint">От 8 символов.</div>
+
+        <label for="password2">Повторите пароль</label>
+        <input type="password" id="password2" autocomplete="new-password" required>
+
+        <button type="submit" id="submit-btn">Сохранить и войти заново</button>
+    </form>
+
+    <script>
+        const form = document.getElementById('setup-form');
+        const errorBox = document.getElementById('error');
+        const submitBtn = document.getElementById('submit-btn');
+
+        fetch('/api/me')
+            .then(res => res.ok ? res.json() : null)
+            .then(me => {
+                if (me) {
+                    document.getElementById('greeting').textContent =
+                        `${me.full_name || me.username}: задайте свои логин и пароль`;
+                }
+            })
+            .catch(() => {});
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            errorBox.style.display = 'none';
+
+            const password = document.getElementById('password').value;
+            if (password !== document.getElementById('password2').value) {
+                errorBox.textContent = 'Пароли не совпадают';
+                errorBox.style.display = 'block';
+                return;
+            }
+            submitBtn.disabled = true;
+
+            fetch('/api/setup-credentials', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: document.getElementById('username').value, password }),
+            })
+                .then(res => res.json().then(data => ({ ok: res.ok, data })))
+                .then(({ ok, data }) => {
+                    if (!ok) {
+                        errorBox.textContent = data.detail || 'Не удалось сохранить';
+                        errorBox.style.display = 'block';
+                        submitBtn.disabled = false;
+                        return;
+                    }
+                    window.location.href = '/login';
+                })
+                .catch(err => {
+                    errorBox.textContent = `Ошибка сети: ${err.message}`;
+                    errorBox.style.display = 'block';
+                    submitBtn.disabled = false;
+                });
+        });
+    </script>
+</body>
+</html>

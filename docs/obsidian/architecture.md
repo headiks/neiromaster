@@ -1,0 +1,47 @@
+---
+tags: [project]
+project: neiromaster
+updated: 2026-08-13
+---
+
+# Архитектура: neiromaster
+
+## Поток данных — вопрос сотрудника
+1. `POST /ask` в `app.py` (нужна сессия) — session_id связывает вопросы в диалог
+2. `test_cascade.handle_question()`: анализ истории → классификация route/risk
+3. Если `rag` → `topics.route_question()` выбирает 1-2 темы вектором
+4. `search()` в Qdrant с фильтром по темам → `rerank()` → отбор по порогу
+5. `generate_answer()` (qwen3:14b) пишет ответ строго по top-фрагментам
+6. История диалога хранится в памяти процесса (`_conversation_history` в app.py)
+
+## Поток данных — загрузка документа (асинхронно)
+1. `POST /documents/upload` → `save_uploaded_file()` → `enqueue_document()` → 202 + job_id
+2. Воркер-поток (FIFO) берёт файл: `index_document()` docling-конвертация → кэш
+3. `topics.classify_document()`: быстрый вектор (score≥0.80) или LLM → тема/папка
+4. Посекционный чанкинг (заголовки docling / номера пунктов) + эмбеддинг →
+   Qdrant с payload `topic`+`section`. Фронт опрашивает `GET /documents/jobs/{id}`
+5. Поиск ускорен keyword-индексами payload на `topic`/`source`/`section`
+
+## Поток данных — план и расписание
+1. `planner`: каталог этапов (`data/stage_catalog.json`) → план (plan.json)
+2. `POST /plans/{id}/generate` → фоновая задача: по подэтапу поиск в Qdrant → текст
+3. `employees.build_employee_schedule()`: план + дата выхода + плейсхолдеры → расписание
+4. Экспорт в plan.json/md, schedule.json/md (send_at рассчитан, но не отправляется)
+
+## Ключевые связи между модулями
+- `app.py` — единственный HTTP-слой, тянет все модули
+- `test_cascade.py` (RAG) зависит от `topics.py` и `config.get_embedding`
+- `topics.py` — и классификация документов, и маршрутизация вопросов (одна коллекция тем)
+- `indexing.py` использует `topics.classify_document` при загрузке
+- `employees.py` зависит от `planner` (расписание считается из плана)
+- `auth.py` (сессии) + `users.py` (профили/роли) — разделены: auth не знает о профилях
+- `config.py` — общие константы (Qdrant/Ollama хосты, эмбеддинг)
+
+## Важные решения
+- Темы = папка на диске + точка в Qdrant-коллекции `topics`: дешёвый вектор отсекает
+  очевидное, LLM решает спорное, «Общие вопросы» ловит остаток — загрузка не падает из-за LLM
+- Тексты сообщений зависят от документов, не от человека → один план на N сотрудников
+- Сессии в памяти процесса → не переживают рестарт, не шарятся между воркерами (нужен Redis)
+- Вопрос без ответа не теряется: `app._route_to_human` в `/ask` при пустом ответе
+  (escalate ЧС или rag без фрагментов) ставит его в очередь `questions.py`; админ
+  отвечает через `/questions/{id}/resolve`, сотрудник видит ответ в `/api/my/questions`

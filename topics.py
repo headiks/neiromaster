@@ -1,0 +1,265 @@
+"""
+Автосортировка документов по темам и векторная маршрутизация вопросов к нужным папкам.
+
+Идея:
+  - Каждая тема ("Работа на высоте", "Пожарная безопасность", ...) — это одновременно
+    физическая папка (data/documents/<slug>/, data/converted/<slug>/) и точка в отдельной
+    Qdrant-коллекции "topics" с вектором её тега (название + описание + ключевые слова).
+
+  - Загрузка документа: берём его краткое содержание (заголовок + начало markdown),
+    сравниваем вектором с уже существующими темами.
+      - Похоже на существующую (score >= TOPIC_MATCH_THRESHOLD) -> кладём туда сразу,
+        без вызова LLM (быстрый путь — важно, когда тем станут сотни).
+      - Не похоже -> просим модель свериться со списком тем ещё раз (она видит смысл
+        тоньше вектора) и либо находит подходящую, либо придумывает новую: название,
+        slug, ключевые слова, описание. Создаётся новая папка.
+
+  - Вопрос пользователя: сравниваем вектором с темами, берём top-K подходящих.
+    Дальше test_cascade.py ищет чанки ТОЛЬКО среди этих тем (payload-фильтр по полю
+    "topic" в основной коллекции) — то есть по факту не по всей базе документов,
+    а только по нужным папкам. Не найдено уверенных совпадений -> ищем по всем темам
+    (лучше найти что-то не в той папке, чем ничего не найти).
+"""
+
+import re
+import json
+import uuid
+import threading
+from typing import Optional
+
+import requests
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
+
+from config import DOCS_DIR, CONVERTED_DIR, QDRANT_HOST, QDRANT_PORT, EMBED_DIM, OLLAMA_URL, get_embedding
+
+TOPICS_COLLECTION = "topics"
+TOPIC_MODEL = "qwen2.5:3b"      # та же быстрая модель, что и для классификации вопросов в test_cascade.py
+TOPIC_LLM_TIMEOUT = 60
+
+TOPIC_MATCH_THRESHOLD = 0.80    # уверенный векторный матч с темой -> кладём без вызова LLM
+TOPIC_ROUTE_THRESHOLD = 0.35    # порог для маршрутизации вопроса; ниже -> ищем по всем темам сразу
+TOPIC_ROUTE_TOP_K = 2           # сколько тем максимум подключаем к одному вопросу
+
+GENERAL_SLUG = "obshee"
+GENERAL_NAME = "Общие вопросы"
+GENERAL_DESCRIPTION = "Документы, которые не удалось уверенно отнести к более узкой теме"
+
+client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+_lock = threading.Lock()
+
+
+def _log(step, msg):
+    print(f"[TOPICS:{step}] {msg}")
+
+
+def ensure_topics_collection():
+    names = [c.name for c in client.get_collections().collections]
+    if TOPICS_COLLECTION not in names:
+        client.create_collection(
+            collection_name=TOPICS_COLLECTION,
+            vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
+        )
+        _log("INIT", f"Коллекция '{TOPICS_COLLECTION}' создана")
+
+
+def slugify(text: str) -> str:
+    """Человекочитаемое латинское имя папки из русского названия темы."""
+    text = text.lower().strip()
+    table = str.maketrans({
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+        "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+        "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c",
+        "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    })
+    text = text.translate(table)
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or f"topic_{uuid.uuid4().hex[:6]}"
+
+
+def _tag_text(name: str, description: str, keywords: list) -> str:
+    kw = ", ".join(keywords or [])
+    return f"{name}. {description}. Ключевые слова: {kw}".strip()
+
+
+def list_topics() -> list:
+    ensure_topics_collection()
+    points, _ = client.scroll(collection_name=TOPICS_COLLECTION, limit=500, with_payload=True, with_vectors=False)
+    return [p.payload for p in points]
+
+
+def get_topic(slug: str) -> Optional[dict]:
+    ensure_topics_collection()
+    points, _ = client.scroll(
+        collection_name=TOPICS_COLLECTION,
+        scroll_filter=Filter(must=[FieldCondition(key="slug", match=MatchValue(value=slug))]),
+        limit=1, with_payload=True, with_vectors=False,
+    )
+    return points[0].payload if points else None
+
+
+def _upsert_topic_point(slug, name, description, keywords, doc_count):
+    vec = get_embedding(_tag_text(name, description, keywords))
+    point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"topic-{slug}"))
+    client.upsert(collection_name=TOPICS_COLLECTION, points=[PointStruct(
+        id=point_id,
+        vector=vec,
+        payload={
+            "slug": slug,
+            "name": name,
+            "description": description,
+            "keywords": keywords,
+            "doc_count": doc_count,
+            "folder": str(DOCS_DIR / slug),
+        },
+    )])
+
+
+def create_topic(slug: str, name: str, description: str = "", keywords: Optional[list] = None) -> dict:
+    ensure_topics_collection()
+    with _lock:
+        existing = get_topic(slug)
+        if existing:
+            return existing
+        keywords = keywords or []
+        (DOCS_DIR / slug).mkdir(parents=True, exist_ok=True)
+        (CONVERTED_DIR / slug).mkdir(parents=True, exist_ok=True)
+        _upsert_topic_point(slug, name, description, keywords, doc_count=0)
+        _log("CREATE", f"Новая тема «{name}» ({slug})")
+        return get_topic(slug)
+
+
+def bump_doc_count(slug: str, delta: int = 1):
+    topic = get_topic(slug)
+    if not topic:
+        return
+    new_count = max(0, topic.get("doc_count", 0) + delta)
+    _upsert_topic_point(slug, topic["name"], topic.get("description", ""), topic.get("keywords", []), new_count)
+
+
+def register_manual_topic(slug: str) -> dict:
+    """Документ уже лежал в data/documents/<slug>/ при запуске индексации (ручная
+    раскладка оператором) — регистрируем тему по имени папки, если её ещё нет."""
+    existing = get_topic(slug)
+    if existing:
+        return existing
+    name = slug.replace("_", " ").strip().capitalize() or slug
+    return create_topic(slug, name, description="Тема создана по имени папки (документ размещён вручную)")
+
+
+# ---------- Классификация документа при загрузке ----------
+CLASSIFY_DOC_SYSTEM = """
+Ты — модуль автосортировки документов по темам в базе знаний регламентов предприятия.
+
+Тебе даны: список уже существующих тем (slug и название) и краткое содержание нового документа.
+
+Правила:
+1. Если документ **точно и полностью** соответствует одной из существующих тем (т.е. охватывает ту же область и не содержит существенных отличий) — верни её slug и "is_new": false.
+2. В противном случае, даже если есть некоторое пересечение, но документ затрагивает новые аспекты или отличается по направленности — предложи новую тему.
+3. Новая тема должна быть **узкой и конкретной**, отражать основное содержание документа. Не делай темы слишком широкими (например, вместо "Охрана труда" используй "Работа на высоте" или "Пожарная безопасность").
+4. Slug должен быть на латинице в snake_case, состоять из 2-4 слов, отражающих суть темы. Название на русском — краткое и ёмкое.
+5. Если документ охватывает несколько разных областей, выбери основную, но если они равнозначны — создай новую тему, которая объединяет их (например, "Высота и пожарная безопасность").
+
+Верни ТОЛЬКО JSON:
+{"slug": "...", "name": "...", "description": "...", "keywords": ["...", "..."], "is_new": true/false}
+Без пояснений.
+"""
+
+
+def _llm_call(system: str, user: str) -> str:
+    r = requests.post(f"{OLLAMA_URL}/api/chat", json={
+        "model": TOPIC_MODEL,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "stream": False,
+    }, timeout=TOPIC_LLM_TIMEOUT)
+    r.raise_for_status()
+    return r.json()["message"]["content"]
+
+
+def _parse_json(text: str) -> dict:
+    text = re.sub(r"```json\s*|```", "", text)
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("В ответе нет JSON")
+    return json.loads(text[start:end + 1])
+
+
+def classify_document(doc_gist: str) -> dict:
+    """
+    Определяет тему (папку) для нового документа, создаёт её при необходимости.
+    Возвращает {"slug": "...", "name": "...", "is_new": bool}.
+    """
+    ensure_topics_collection()
+    existing = list_topics()
+
+    # Быстрый путь: вектор документа уверенно близок к уже существующей теме —
+    # не тратим вызов LLM (важно при росте базы до сотен документов).
+    if existing:
+        vec = get_embedding(doc_gist)
+        # ИСПРАВЛЕНО: используем query_points вместо search
+        hits = client.query_points(
+            collection_name=TOPICS_COLLECTION,
+            query=vec,
+            limit=1,
+            with_payload=True
+        ).points
+        if hits and hits[0].score >= TOPIC_MATCH_THRESHOLD:
+            payload = hits[0].payload
+            _log("CLASSIFY", f"Уверенный векторный матч: «{payload['name']}» (score={hits[0].score:.3f})")
+            bump_doc_count(payload["slug"], +1)
+            return {"slug": payload["slug"], "name": payload["name"], "is_new": False}
+
+    # Иначе — сверяемся с моделью: она видит смысл тоньше, чем сырой вектор
+    topics_list = "\n".join(f"- {t['slug']}: {t['name']}" for t in existing) or "(тем пока нет)"
+    prompt = f"Существующие темы:\n{topics_list}\n\nНовый документ:\n{doc_gist[:1500]}"
+    try:
+        raw = _llm_call(CLASSIFY_DOC_SYSTEM, prompt)
+        data = _parse_json(raw)
+        slug = (data.get("slug") or "").strip()
+        is_new = bool(data.get("is_new", True))
+
+        if not is_new and slug:
+            topic = get_topic(slug)
+            if topic:
+                bump_doc_count(slug, +1)
+                return {"slug": slug, "name": topic["name"], "is_new": False}
+            # модель сослалась на несуществующую тему — считаем как новую ниже
+
+        name = data.get("name") or "Новая тема"
+        slug = slugify(slug or name)
+        create_topic(slug, name, data.get("description", ""), data.get("keywords", []))
+        bump_doc_count(slug, +1)
+        _log("CLASSIFY", f"Создана/выбрана тема «{name}» ({slug})")
+        return {"slug": slug, "name": name, "is_new": True}
+
+    except Exception as e:
+        _log("CLASSIFY", f"Не удалось классифицировать, кладём в «{GENERAL_NAME}». Ошибка: {e}")
+        create_topic(GENERAL_SLUG, GENERAL_NAME, GENERAL_DESCRIPTION)
+        bump_doc_count(GENERAL_SLUG, +1)
+        return {"slug": GENERAL_SLUG, "name": GENERAL_NAME, "is_new": False}
+
+
+# ---------- Маршрутизация вопроса к темам (запросная сторона) ----------
+def route_question(question: str, top_k: int = TOPIC_ROUTE_TOP_K, threshold: float = TOPIC_ROUTE_THRESHOLD) -> list:
+    """
+    Возвращает список slug тем, релевантных вопросу. Именно по ним потом фильтруется
+    поиск чанков — не по всей базе, а только по нужным папкам. Пустой список означает,
+    что уверенных совпадений нет — поиск идёт по всем темам без фильтра (graceful fallback).
+    """
+    ensure_topics_collection()
+    topics = list_topics()
+    if not topics:
+        return []
+
+    vec = get_embedding(question)
+    # ИСПРАВЛЕНО: используем query_points вместо search
+    hits = client.query_points(
+        collection_name=TOPICS_COLLECTION,
+        query=vec,
+        limit=top_k,
+        with_payload=True
+    ).points
+    matched = [h.payload["slug"] for h in hits if h.score >= threshold]
+    _log("ROUTE", f"Вопрос -> темы: {matched or '(без фильтра, искать по всем)'} "
+                  f"(скоры: {[round(h.score, 3) for h in hits]})")
+    return matched
