@@ -501,6 +501,15 @@ async def remove_plan(plan_id: str):
     return {"plan_id": plan_id, "deleted": True}
 
 
+@app.post("/plans/{plan_id}/duplicate", dependencies=admin_only)
+async def duplicate_plan(plan_id: str, title: str | None = None):
+    """Копия плана под смежную должность — дальше редактируется как обычно."""
+    plan = planner.duplicate_plan(plan_id, title)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="План не найден")
+    return plan
+
+
 @app.post("/plans/{plan_id}/generate", dependencies=admin_only)
 async def generate_plan(plan_id: str):
     """
