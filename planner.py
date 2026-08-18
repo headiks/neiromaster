@@ -293,6 +293,22 @@ def load_plan(plan_id: str) -> Optional[dict]:
         return json.load(f)
 
 
+def duplicate_plan(plan_id: str, new_title: Optional[str] = None) -> Optional[dict]:
+    """
+    Копия плана под смежную должность: та же структура этапов/подэтапов, но новый
+    plan_id и заголовок. Сгенерированные тексты и расписание НЕ копируются — их
+    перегенерируют под новую должность (иначе в копии остались бы ответы про старую).
+    """
+    src = load_plan(plan_id)
+    if src is None:
+        return None
+    src = dict(src)
+    src.pop("plan_id", None)     # normalize_plan выдаст свежий id
+    src.pop("created_at", None)  # и свежие даты
+    src["title"] = (new_title or "").strip() or f"{src.get('title', 'План адаптации')} (копия)"
+    return save_plan(normalize_plan(src))
+
+
 def list_plans() -> list:
     plans = []
     for directory in PLANS_DIR.iterdir():

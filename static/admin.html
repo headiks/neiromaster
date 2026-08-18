@@ -336,6 +336,7 @@
                 <select id="plan-select" onchange="onPlanSelect()"><option value="">— новый план —</option></select>
             </div>
             <button class="ghost-btn" onclick="newPlan()">＋ Новый план</button>
+            <button class="ghost-btn" onclick="duplicatePlan()">⧉ Дублировать</button>
             <button class="ghost-btn" onclick="deletePlan()">🗑 Удалить план</button>
         </div>
 
@@ -803,6 +804,24 @@
             if (!confirm(`Удалить план «${plan.title}» вместе со сгенерированным расписанием?`)) return;
             api(`/plans/${encodeURIComponent(plan.plan_id)}`, { method: 'DELETE' })
                 .then(() => { newPlan(); refreshPlanList(); });
+        }
+
+        function duplicatePlan() {
+            if (!plan.plan_id) { setStatus('Сначала сохраните план, потом его можно дублировать'); return; }
+            const title = prompt('Название копии (под смежную должность):', `${plan.title} (копия)`);
+            if (title === null) return;  // отмена
+            const q = title.trim() ? `?title=${encodeURIComponent(title.trim())}` : '';
+            apiJson(`/plans/${encodeURIComponent(plan.plan_id)}/duplicate${q}`, { method: 'POST' })
+                .then(({ ok, data }) => {
+                    if (!ok) { setStatus(data.detail || 'Не удалось дублировать план'); return; }
+                    plan = data;
+                    fillPlanMeta();
+                    renderStages();
+                    refreshPlanList().then(() => {
+                        document.getElementById('plan-select').value = data.plan_id;
+                    });
+                    setStatus('Создана копия — отредактируйте под должность и сохраните');
+                });
         }
 
         function fillPlanMeta() {
