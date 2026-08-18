@@ -34,6 +34,16 @@ data/registry.json
 data/*.migrated
 data/*.tmp
 
+# --- Секреты и данные БД ---
+.env
+.env.production
+.env.local
+pg_data/
+qdrant_storage/
+*.db
+*.db-wal
+*.db-shm
+
 # --- Прочее ---
 *.tmp
 Thumbs.db

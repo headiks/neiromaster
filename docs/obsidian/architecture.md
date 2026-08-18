@@ -34,7 +34,9 @@ updated: 2026-08-13
 - `topics.py` — и классификация документов, и маршрутизация вопросов (одна коллекция тем)
 - `indexing.py` использует `topics.classify_document` при загрузке
 - `employees.py` зависит от `planner` (расписание считается из плана)
-- `auth.py` (сессии) + `users.py` (профили/роли) — разделены: auth не знает о профилях
+- `auth.py` (сессии, in-memory) + `users.py` (профили/роли в PostgreSQL через `db.py`) —
+  разделены: auth не знает о профилях. Хранилище аккаунтов — SQL, не файлы JSON
+- `app.py` startup — через `lifespan`: `db.init_schema()` → миграции → `ensure_owner`
 - `config.py` — общие константы (Qdrant/Ollama хосты, эмбеддинг)
 
 ## Важные решения

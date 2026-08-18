@@ -3,6 +3,7 @@ import json
 import uuid
 import threading
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from test_cascade import handle_question, HISTORY_WINDOW
+import db
 import indexing
 import planner
 import auth
@@ -24,7 +26,35 @@ from indexing import DOCS_DIR
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-app = FastAPI(title="RAG Assistant API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Схема БД (PostgreSQL) — до первого обращения к аккаунтам
+    db.init_schema()
+    # Векторная коллекция — до первого /ask или загрузки файла
+    indexing.create_collection(recreate=False)
+
+    # Разовые миграции со старых файловых хранилищ в БД
+    moved_json = users.migrate_legacy_json_users()
+    if moved_json:
+        print(f"Перенесено аккаунтов из users.json в БД: {moved_json}")
+    moved = users.migrate_legacy_employees()
+    if moved:
+        print(f"Перенесено записей сотрудников из employees.json в БД: {moved}")
+
+    initial = users.ensure_owner()
+    if initial:
+        print("=" * 70)
+        print("Создана учётная запись главного администратора.")
+        print(f"  Логин:  {initial['username']}")
+        print(f"  Пароль: {initial['password']}")
+        print(f"  Дубль записан в {users.INITIAL_CREDENTIALS_PATH}")
+        print("  При первом входе система попросит задать свои логин и пароль.")
+        print("=" * 70)
+    yield
+
+
+app = FastAPI(title="RAG Assistant API", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -68,28 +98,6 @@ def get_recent_history(session_id: str, n: int = HISTORY_WINDOW) -> list:
 def append_history(session_id: str, question: str, answer: str | None):
     with _history_lock:
         _conversation_history[session_id].append({"question": question, "answer": answer})
-
-
-@app.on_event("startup")
-async def on_startup():
-    # Коллекция должна существовать до первого /ask или первой загрузки файла
-    indexing.create_collection(recreate=False)
-    # Стартовый набор смысловых папок — «словарь тем», от которого отталкивается
-    # LLM-классификатор, чтобы не плодить синонимичные папки
-
-    moved = users.migrate_legacy_employees()
-    if moved:
-        print(f"Перенесено записей сотрудников из employees.json в users.json: {moved}")
-
-    initial = users.ensure_owner()
-    if initial:
-        print("=" * 70)
-        print("Создана учётная запись главного администратора.")
-        print(f"  Логин:  {initial['username']}")
-        print(f"  Пароль: {initial['password']}")
-        print(f"  Дубль записан в {users.INITIAL_CREDENTIALS_PATH}")
-        print("  При первом входе система попросит задать свои логин и пароль.")
-        print("=" * 70)
 
 
 # ---------- Доступ ----------

@@ -1,21 +1,38 @@
 """
 Самопроверка бэкенда аккаунтов: регистрация -> модерация -> вход -> роли.
-Гоняет реальные users.py и auth.py во временной папке, без FastAPI и тяжёлых
-зависимостей (docling/qdrant). Запуск: python test_accounts.py
+Гоняет реальные users.py и auth.py против ОТДЕЛЬНОЙ тестовой БД PostgreSQL
+(таблица users чистится в начале). Без FastAPI и тяжёлых зависимостей (docling/qdrant).
+
+Нужен доступный Postgres. DSN тестовой БД:
+    NEIROMASTER_TEST_DSN (по умолчанию postgresql://neiromaster:neiromaster@localhost:5432/neiromaster_test)
+Если БД недоступна — тест не падает, а печатает SKIP.
+
+Запуск: python test_accounts.py
 """
+import os
 import tempfile
 from pathlib import Path
 
+import psycopg
+from psycopg_pool import PoolTimeout
+
+import db
 import users
 import auth
 
+TEST_DSN = (os.environ.get("NEIROMASTER_TEST_DSN")
+            or "postgresql://neiromaster:neiromaster@localhost:5432/neiromaster_test")
+
 
 def _isolate(tmp: Path):
-    """Увести всё файловое хранилище во временную папку — не трогаем реальные data/."""
+    """Файловые артефакты — во временную папку; БД — в отдельную тестовую, с чистой таблицей."""
     users.DATA_DIR = tmp
     users.USERS_PATH = tmp / "users.json"
     users.INITIAL_CREDENTIALS_PATH = tmp / "owner_initial_credentials.txt"
     users.LEGACY_EMPLOYEES_PATH = tmp / "employees.json"
+    db.configure(TEST_DSN)
+    db.init_schema()
+    db.execute("DELETE FROM users")
 
 
 def run():
@@ -88,4 +105,7 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except (psycopg.OperationalError, PoolTimeout) as e:
+        print(f"SKIP: PostgreSQL недоступен ({TEST_DSN}). {e}")
