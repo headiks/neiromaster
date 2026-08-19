@@ -129,12 +129,41 @@ def create_topic(slug: str, name: str, description: str = "", keywords: Optional
         return get_topic(slug)
 
 
-def bump_doc_count(slug: str, delta: int = 1):
+def bump_doc_count(slug: str, delta: int = 1) -> int:
+    """Меняет счётчик документов темы и возвращает новое значение (0, если темы нет)."""
     topic = get_topic(slug)
     if not topic:
-        return
+        return 0
     new_count = max(0, topic.get("doc_count", 0) + delta)
     _upsert_topic_point(slug, topic["name"], topic.get("description", ""), topic.get("keywords", []), new_count)
+    return new_count
+
+
+def delete_topic(slug: str) -> bool:
+    """
+    Удаляет тему целиком: точку в Qdrant + физические папки data/documents/<slug>
+    и data/converted/<slug>. Папку сносим только если она пуста — страховка от
+    удаления вместе с чьими-то оставшимися файлами. Вызывается, когда из папки
+    убран последний документ (doc_count дошёл до 0). Тема при необходимости
+    заведётся заново при следующей загрузке документа.
+    """
+    ensure_topics_collection()
+    with _lock:
+        if not get_topic(slug):
+            return False
+        client.delete(
+            collection_name=TOPICS_COLLECTION,
+            points_selector=Filter(must=[FieldCondition(key="slug", match=MatchValue(value=slug))]),
+        )
+        for base in (DOCS_DIR, CONVERTED_DIR):
+            folder = base / slug
+            if folder.is_dir():
+                try:
+                    folder.rmdir()          # снимется только если папка пуста
+                except OSError:
+                    _log("DELETE", f"Папка {folder} не пуста — оставляю")
+        _log("DELETE", f"Тема удалена (не осталось документов): {slug}")
+        return True
 
 
 def register_manual_topic(slug: str) -> dict:
