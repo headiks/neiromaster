@@ -25,6 +25,7 @@ CLI-скриптом (index_documents.py), и веб-приложением (app
 
 import re
 import json
+import math
 import time
 import uuid
 import queue
@@ -403,6 +404,61 @@ def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: in
         "page": h.payload.get("page"),
         "score": h.score,
     } for h in hits]
+
+
+def _vector_stats(vector) -> dict:
+    """Компактная сводка по вектору чанка: размерность, норма, первые значения.
+    Полный вектор из 1024 чисел в UI не нужен — для инспекции достаточно превью."""
+    vec = list(vector or [])
+    dim = len(vec)
+    norm = math.sqrt(sum(v * v for v in vec)) if vec else 0.0
+    return {
+        "dim": dim,
+        "norm": round(norm, 4),
+        "preview": [round(float(v), 4) for v in vec[:16]],
+    }
+
+
+def get_document_chunks(filename: str) -> Optional[dict]:
+    """
+    Подробности индексации одного документа для админки: как он разбит на чанки
+    и как выглядит вектор каждого чанка. None — если чанков в Qdrant нет.
+    """
+    points = []
+    offset = None
+    while True:
+        batch, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=filename))]),
+            limit=256,
+            with_payload=True,
+            with_vectors=True,
+            offset=offset,
+        )
+        points.extend(batch)
+        if offset is None:
+            break
+
+    if not points:
+        return None
+
+    chunks = []
+    for p in points:
+        payload = p.payload or {}
+        chunks.append({
+            "id": str(p.id),
+            "chunk_index": payload.get("chunk_index"),
+            "section": payload.get("section"),
+            "headings": payload.get("headings") or [],
+            "page": payload.get("page"),
+            "topic": payload.get("topic"),
+            "length": payload.get("length"),
+            "text": payload.get("text", ""),          # то, что реально ушло в эмбеддинг
+            "raw_text": payload.get("raw_text", ""),   # исходный текст пункта без контекста заголовков
+            "vector": _vector_stats(p.vector),
+        })
+    chunks.sort(key=lambda c: (c["chunk_index"] is None, c["chunk_index"] or 0))
+    return {"filename": filename, "chunks": chunks, "count": len(chunks)}
 
 
 def delete_document_vectors(filename: str):

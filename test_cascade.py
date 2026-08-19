@@ -16,7 +16,7 @@ MAX_CONTEXT_FRAGMENTS = 3
 HISTORY_WINDOW = 3   # сколько последних вопросов пользователя учитывать при разрешении контекста
 DEBUG = True
 
-EMBED_TIMEOUT = 30
+EMBED_TIMEOUT = 120   # первый эмбеддинг грузит bge-m3 в память (на CPU долго) — 30 с не хватало
 SMALL_LLM_TIMEOUT = 60
 BIG_LLM_TIMEOUT = 90
 QDRANT_TIMEOUT = 15
