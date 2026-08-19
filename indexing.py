@@ -492,7 +492,18 @@ def delete_document(filename: str, remove_file: bool = True) -> bool:
             if md_path.exists():
                 md_path.unlink()
         if entry.get("topic"):
-            topics.bump_doc_count(entry["topic"], -1)
+            slug = entry["topic"]
+            topics.bump_doc_count(slug, -1)
+            # Убрали последний документ из смысловой папки — удаляем и саму папку/тему.
+            # Число файлов берём из реестра (источник истины, как в folder_stats),
+            # а не из doc_count темы, который может разойтись. Текущий файл ещё в
+            # реестре (удаляется ниже), поэтому исключаем его из проверки.
+            with _registry_lock:
+                reg_now = _load_registry()
+            still_used = any(name != filename and doc.get("topic") == slug
+                             for name, doc in reg_now.items())
+            if not still_used:
+                topics.delete_topic(slug)
 
     with _registry_lock:
         reg = _load_registry()
