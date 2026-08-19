@@ -3,6 +3,7 @@
 что нужно и indexing.py, и topics.py, и test_cascade.py одновременно.
 Вынесено отдельно, чтобы indexing.py <-> topics.py не импортировали друг друга по кругу.
 """
+import os
 from pathlib import Path
 import requests
 
@@ -29,7 +30,10 @@ QDRANT_PORT = 6333
 OLLAMA_URL = "http://localhost:8080"
 EMBED_MODEL = "bge-m3"
 EMBED_DIM = 1024
-EMBED_TIMEOUT = 30
+# Первый эмбеддинг грузит модель bge-m3 в память (на CPU — долго), а при индексации
+# документа их считаются десятки подряд. 30 с не хватало -> документ падал в error
+# по read timeout. Переопределяется переменной NEIROMASTER_EMBED_TIMEOUT.
+EMBED_TIMEOUT = int(os.environ.get("NEIROMASTER_EMBED_TIMEOUT", "120"))
 
 
 def get_embedding(text: str):

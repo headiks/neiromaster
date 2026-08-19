@@ -421,6 +421,15 @@ async def get_document_job(job_id: str):
     return job
 
 
+@app.get("/documents/{filename}/chunks", dependencies=admin_only)
+async def get_document_chunks(filename: str):
+    """Подробности разбиения документа: чанки и вектор каждого чанка (для кнопки «Подробнее»)."""
+    detail = indexing.get_document_chunks(filename)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Чанки не найдены — документ ещё не проиндексирован")
+    return detail
+
+
 @app.delete("/documents/{filename}", dependencies=admin_only)
 async def remove_document(filename: str):
     """Удаляет документ: векторы из Qdrant, оригинал из data/documents, кэш docling."""

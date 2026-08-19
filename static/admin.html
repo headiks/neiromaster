@@ -319,7 +319,7 @@
         </div>
         <div class="toolbar" style="margin-top:12px;">
             <label style="font-size:14px;color:#475569;">
-                <input type="checkbox" id="questions-show-all" onchange="loadQuestions()"> Показать отвечённые
+                <input type="checkbox" id="questions-show-all" onchange="loadQuestions()"> Показать отвеченные
             </label>
             <button class="ghost-btn" onclick="loadQuestions()">🔄 Обновить</button>
         </div>
@@ -484,6 +484,14 @@
             <button class="primary-btn" style="flex:1;padding:9px;" onclick="submitPasswordChange()">Сменить</button>
             <button class="ghost-btn" onclick="document.getElementById('password-dialog').close()">Отмена</button>
         </div>
+    </dialog>
+
+    <dialog id="doc-detail-dialog" style="max-width:900px;width:92vw;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+            <h3 style="margin:0;" id="doc-detail-title">Подробности документа</h3>
+            <button class="ghost-btn" onclick="document.getElementById('doc-detail-dialog').close()">Закрыть</button>
+        </div>
+        <div id="doc-detail-body" style="margin-top:12px;max-height:72vh;overflow:auto;"></div>
     </dialog>
 
     <script>
@@ -710,11 +718,68 @@
                         </div>
                         <div class="doc-status">
                             <span class="status-badge ${doc.status}">${statusLabel(doc.status)}</span>
+                            ${doc.chunks ? `<button class="icon-btn" onclick="showDocDetail('${escapeHtml(doc.filename)}')">Подробнее</button>` : ''}
                             <button class="del-btn" onclick="deleteDocument('${escapeHtml(doc.filename)}')">Удалить</button>
                         </div>
                     </div>
                 `;
             }).join('');
+        }
+
+        function showDocDetail(filename) {
+            const dialog = document.getElementById('doc-detail-dialog');
+            const body = document.getElementById('doc-detail-body');
+            document.getElementById('doc-detail-title').textContent = `📄 ${filename}`;
+            body.innerHTML = `<div class="empty-hint">Загружаем чанки и векторы…</div>`;
+            dialog.showModal();
+            apiJson(`/documents/${encodeURIComponent(filename)}/chunks`)
+                .then(({ ok, data }) => {
+                    if (!ok) { body.innerHTML = `<div class="warn">⚠️ ${escapeHtml(data.detail || 'Не удалось получить данные')}</div>`; return; }
+                    body.innerHTML = renderDocDetail(data);
+                })
+                .catch(err => { body.innerHTML = `<div class="error">Ошибка: ${escapeHtml(err.message)}</div>`; });
+        }
+
+        function renderDocDetail(data) {
+            const chunks = data.chunks || [];
+            const dim = chunks.length ? chunks[0].vector.dim : 0;
+            const head = `<div class="doc-meta" style="margin-bottom:12px;">
+                Всего чанков: <strong>${chunks.length}</strong> ·
+                размерность вектора: <strong>${dim}</strong> ·
+                модель эмбеддинга: <strong>bge-m3</strong>.
+                Каждый чанк — отдельная точка в Qdrant: слева текст, ушедший в эмбеддинг,
+                справа — вектор этого текста (норма и первые 16 из ${dim} значений).
+            </div>`;
+            const rows = chunks.map(c => {
+                const headings = (c.headings || []).filter(Boolean).join(' / ');
+                const meta = [
+                    c.section ? `§ ${escapeHtml(c.section)}` : null,
+                    c.page != null ? `стр. ${c.page}` : null,
+                    c.length != null ? `${c.length} симв.` : null,
+                    `тема: ${escapeHtml(c.topic || '—')}`,
+                ].filter(Boolean).join(' · ');
+                const vec = c.vector || { dim: 0, norm: 0, preview: [] };
+                const preview = (vec.preview || []).map(v => v.toFixed(4)).join(', ');
+                return `<div class="card" style="margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                        <strong>Чанк #${c.chunk_index != null ? c.chunk_index : '?'}</strong>
+                        <small style="color:#94a3b8;">id: ${escapeHtml(c.id)}</small>
+                    </div>
+                    <div class="doc-meta" style="margin:4px 0;">${meta}</div>
+                    ${headings ? `<div class="doc-meta" style="color:#475569;">🧭 ${escapeHtml(headings)}</div>` : ''}
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px;">
+                        <div>
+                            <div class="doc-meta" style="margin-bottom:4px;">Текст (ушёл в эмбеддинг):</div>
+                            <div class="msg-text" style="white-space:pre-wrap;">${escapeHtml(c.text || '—')}</div>
+                        </div>
+                        <div>
+                            <div class="doc-meta" style="margin-bottom:4px;">Вектор: dim=${vec.dim}, ‖v‖=${vec.norm}</div>
+                            <code style="display:block;background:#0f172a;color:#a5b4fc;padding:8px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-all;">[${preview}${vec.dim > (vec.preview || []).length ? ', …' : ''}]</code>
+                        </div>
+                    </div>
+                </div>`;
+            }).join('');
+            return head + (rows || `<div class="empty-hint">Чанков нет.</div>`);
         }
 
         function deleteDocument(filename) {
