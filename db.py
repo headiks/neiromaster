@@ -65,6 +65,17 @@ SCHEMA_STATEMENTS = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_role     ON users(role)",
+    # Сессии входа. В БД, а не в памяти процесса: переживают перезапуск приложения
+    # (пользователей не разлогинивает) и общие для всех uvicorn-воркеров.
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        token       TEXT PRIMARY KEY,
+        user_id     TEXT             NOT NULL,
+        created_at  DOUBLE PRECISION NOT NULL,
+        seen_at     DOUBLE PRECISION NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
 )
 
 

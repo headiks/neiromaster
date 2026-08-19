@@ -36,7 +36,7 @@ sudo apt-get install -y python3 python3-venv python3-pip build-essential libgl1 
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
 ```
 
 `--extra-index-url ...whl/cpu` ставит CPU-сборку torch (нужна docling). Если на
@@ -48,11 +48,24 @@ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/w
 
 ```bash
 PG_PASS="$(openssl rand -hex 16)"
+PII_KEY="$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 cat > .env.production <<EOF
 NEIROMASTER_DB_DSN=postgresql://neiromaster:${PG_PASS}@localhost:5432/neiromaster
+NEIROMASTER_PII_KEY=${PII_KEY}
 EOF
 chmod 600 .env.production
 ```
+
+`NEIROMASTER_PII_KEY` включает шифрование персональных данных в БД (ФИО, должность,
+контакты, наставник, заметки) — свободный текст профиля хранится зашифрованным
+(Fernet). Защищает утёкший дамп/бэкап. **Ключ не терять** — без него зашифрованные
+поля не прочитать; храните копию отдельно от бэкапов БД. Убрать переменную =
+новые записи снова открытым текстом (старые зашифрованные останутся). Логины, роли
+и пароли (scrypt-хэш) шифрованием не затрагиваются.
+
+> Шифрование поля-в-поле защищает от утечки *дампа*, но ключ лежит на том же
+> сервере — от полной компрометации хоста это не спасает. Для «at rest» целиком
+> добавьте шифрование диска/тома (LUKS) под `pg_data/`.
 
 Поднять контейнер (порт только на localhost, данные в томе `pg_data/`):
 
@@ -197,9 +210,9 @@ sudo systemctl restart rag-app
 
 ## Масштабирование (много пользователей)
 
-- Несколько воркеров: `uvicorn app:app --workers N`. Тогда сессии (сейчас в памяти
-  процесса) вынести в Redis — иначе вход на одном воркере не виден другим.
-  Размер пула БД — `NEIROMASTER_DB_POOL` (по умолчанию 10); суммарно по воркерам
-  не превышать `max_connections` Postgres.
+- Несколько воркеров: `uvicorn app:app --workers N`. Сессии лежат в Postgres
+  (таблица `sessions`) — общие для всех воркеров и переживают перезапуск, Redis не
+  нужен. Размер пула БД — `NEIROMASTER_DB_POOL` (по умолчанию 10); суммарно по
+  воркерам не превышать `max_connections` Postgres.
 - Отдельный сервер БД: поменять только `NEIROMASTER_DB_DSN` в `.env.production`,
   код не меняется.

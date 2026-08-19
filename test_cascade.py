@@ -42,11 +42,22 @@ def is_greeting_or_general(text):
     question_starters = ["что", "как", "где", "когда", "почему", "зачем", "сколько", "кто", "какой"]
     if any(text_lower.startswith(w) for w in question_starters):
         return False
-    words = text_lower.split()
-    if len(words) <= 4:
-        for phrase in GREETING_PHRASES:
-            if phrase in text_lower:
-                return True
+    words = re.findall(r'\w+', text_lower)
+    if not words or len(words) > 4:
+        return False
+
+    # Многословное приветствие как самостоятельная фраза («как дела», «добрый день»).
+    for phrase in GREETING_PHRASES:
+        if ' ' in phrase and re.search(r'\b' + re.escape(phrase) + r'\b', text_lower):
+            return True
+
+    # Однословные приветствия и подтверждения («да», «нет», «ок», «спасибо») считаем
+    # «общей фразой» ТОЛЬКО когда из них состоит ВЕСЬ текст. Иначе «нет» в «мне плохо
+    # нет сил» или «да» в «станок сломался да искрит» ошибочно увели бы реальное — и
+    # даже тревожное — сообщение в маршрут general мимо RAG и эскалации.
+    single = {p for p in GREETING_PHRASES if ' ' not in p}
+    if all(w in single for w in words):
+        return True
     return False
 
 def has_rag_keywords(text):
@@ -327,18 +338,16 @@ def rerank(question, candidates):
             pass
         # Если JSON не удался, ищем число через regex
         if relevance is None:
-            numbers = re.findall(r'(\d+\.?\d*)', raw)
-            if numbers:
-                try:
-                    val = float(numbers[0])
-                    if 0.0 <= val <= 1.0:
-                        relevance = val
-                    elif val > 1 and val <= 100:
-                        relevance = val / 100.0
-                    else:
-                        relevance = None
-                except:
-                    pass
+            # Берём первое число, похожее на оценку (0..1), а не просто первое в тексте:
+            # «1 из 10: 0.3» иначе давало бы 1.0. Только если такого нет — трактуем
+            # процент (>1..100) как долю.
+            numbers = [float(n) for n in re.findall(r'(\d+\.?\d*)', raw)]
+            in_range = next((v for v in numbers if 0.0 <= v <= 1.0), None)
+            if in_range is not None:
+                relevance = in_range
+            else:
+                pct = next((v for v in numbers if 1 < v <= 100), None)
+                relevance = pct / 100.0 if pct is not None else None
         # Если всё равно None, используем векторный скор как fallback (но только если он > 0.5)
         if relevance is None:
             vector_score = c["score"]

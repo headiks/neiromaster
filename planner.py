@@ -272,8 +272,15 @@ def normalize_plan(raw: dict, plan_id: Optional[str] = None) -> dict:
 
 # ---------- Хранилище планов ----------
 def plan_dir(plan_id: str) -> Path:
-    safe = "".join(c for c in plan_id if c.isalnum() or c in "-_")
-    return PLANS_DIR / safe
+    safe = "".join(c for c in str(plan_id or "") if c.isalnum() or c in "-_")
+    # Пустой или состоящий только из «-_» id схлопывается в сам PLANS_DIR — тогда
+    # delete_plan снёс бы ВСЕ планы разом (rglob+rmdir по корню). Отвергаем такие id.
+    if not safe.strip("-_"):
+        raise ValueError(f"Некорректный идентификатор плана: {plan_id!r}")
+    resolved = (PLANS_DIR / safe).resolve()
+    if resolved.parent != PLANS_DIR.resolve():
+        raise ValueError(f"Некорректный идентификатор плана: {plan_id!r}")
+    return resolved
 
 
 def save_plan(plan: dict) -> dict:
@@ -286,7 +293,10 @@ def save_plan(plan: dict) -> dict:
 
 
 def load_plan(plan_id: str) -> Optional[dict]:
-    path = plan_dir(plan_id) / "plan.json"
+    try:
+        path = plan_dir(plan_id) / "plan.json"
+    except ValueError:
+        return None
     if not path.exists():
         return None
     with open(path, "r", encoding="utf-8") as f:
@@ -336,7 +346,10 @@ def list_plans() -> list:
 
 
 def delete_plan(plan_id: str) -> bool:
-    directory = plan_dir(plan_id)
+    try:
+        directory = plan_dir(plan_id)
+    except ValueError:
+        return False
     if not directory.exists():
         return False
     for item in sorted(directory.rglob("*"), reverse=True):
@@ -346,7 +359,10 @@ def delete_plan(plan_id: str) -> bool:
 
 
 def load_schedule(plan_id: str) -> Optional[dict]:
-    path = plan_dir(plan_id) / "schedule.json"
+    try:
+        path = plan_dir(plan_id) / "schedule.json"
+    except ValueError:
+        return None
     if not path.exists():
         return None
     with open(path, "r", encoding="utf-8") as f:

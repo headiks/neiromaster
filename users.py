@@ -106,16 +106,63 @@ def normalize_username(username: str) -> str:
     return username
 
 
-# ---------- Хранилище (SQLite) ----------
+# ---------- Шифрование ПДн в БД (at rest) ----------
+# Свободный текст профиля (ФИО, должность, контакты, наставник, руководитель,
+# заметки) шифруется в БД, ЕСЛИ задан ключ NEIROMASTER_PII_KEY (Fernet-ключ,
+# сгенерировать: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
+# Без ключа поведение прежнее — открытый текст. Шифртекст помечается префиксом
+# «enc:», поэтому старые открытые строки и новые зашифрованные уживаются в одной
+# таблице без миграции: расшифровка трогает только значения с префиксом.
+#
+# Защищает утёкший дамп/бэкап БД (pg_dump, украденный том). Ключ лежит в
+# .env.production рядом с БД, поэтому от полной компрометации хоста не спасает —
+# для этого нужно ещё шифрование диска (LUKS). Логин/поиск не затрагиваются:
+# username/role/id остаются открытыми, сортировка по ФИО идёт уже по расшифрованным
+# значениям в Python (list_users), не в SQL.
+_ENCRYPTED_COLUMNS = ("full_name", "position", "department", "contact", "mentor", "manager", "notes")
+_PII_PREFIX = "enc:"
+
+
+def _fernet():
+    key = os.environ.get("NEIROMASTER_PII_KEY")
+    if not key:
+        return None                       # ключ не задан — шифрование выключено
+    from cryptography.fernet import Fernet
+    return Fernet(key.encode())
+
+
+def _encrypt_field(value):
+    f = _fernet()
+    if f is None or not value:
+        return value
+    return _PII_PREFIX + f.encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_field(value):
+    if not isinstance(value, str) or not value.startswith(_PII_PREFIX):
+        return value                      # старое поле открытым текстом — вернуть как есть
+    f = _fernet()
+    if f is None:
+        return value                      # ключ убрали — не падать, отдать хотя бы шифртекст
+    from cryptography.fernet import InvalidToken
+    try:
+        return f.decrypt(value[len(_PII_PREFIX):].encode("ascii")).decode("utf-8")
+    except InvalidToken:
+        return value
+
+
+# ---------- Хранилище (PostgreSQL) ----------
 def _row_to_user(row) -> dict:
     user = {col: row[col] for col in _COLUMNS}
     for col in _BOOL_COLUMNS:
         user[col] = bool(user[col])
+    for col in _ENCRYPTED_COLUMNS:
+        user[col] = _decrypt_field(user[col])
     return user
 
 
 def _insert(user: dict):
-    values = [user[c] for c in _COLUMNS]
+    values = [_encrypt_field(user[c]) if c in _ENCRYPTED_COLUMNS else user[c] for c in _COLUMNS]
     placeholders = ", ".join("%s" for _ in _COLUMNS)
     db.execute(f"INSERT INTO users ({', '.join(_COLUMNS)}) VALUES ({placeholders})", values)
 
@@ -123,7 +170,7 @@ def _insert(user: dict):
 def _save_user(user: dict):
     """Перезапись всех колонок записи по id (аналог прежнего load->mutate->save)."""
     cols = [c for c in _COLUMNS if c != "id"]
-    values = [user.get(c) for c in cols]
+    values = [_encrypt_field(user.get(c)) if c in _ENCRYPTED_COLUMNS else user.get(c) for c in cols]
     values.append(user["id"])
     db.execute(f"UPDATE users SET {', '.join(c + ' = %s' for c in cols)} WHERE id = %s", values)
 
@@ -527,3 +574,17 @@ def migrate_legacy_employees() -> int:
 
     LEGACY_EMPLOYEES_PATH.replace(LEGACY_EMPLOYEES_PATH.with_suffix(".json.migrated"))
     return moved
+
+
+if __name__ == "__main__":
+    # Проверка шифрования ПДн без БД: round-trip, префикс, обратная совместимость.
+    from cryptography.fernet import Fernet as _F
+    os.environ["NEIROMASTER_PII_KEY"] = _F.generate_key().decode()
+    _ct = _encrypt_field("Иванов Иван")
+    assert _ct.startswith(_PII_PREFIX) and _ct != "Иванов Иван"
+    assert _decrypt_field(_ct) == "Иванов Иван"
+    assert _decrypt_field("открытый текст") == "открытый текст"   # старое поле не трогаем
+    assert _encrypt_field("") == "" and _decrypt_field("") == ""  # пустое не шифруем
+    os.environ.pop("NEIROMASTER_PII_KEY")
+    assert _decrypt_field(_ct) == _ct        # без ключа не падаем, отдаём шифртекст
+    print("OK: шифрование ПДн — round-trip, префикс, совместимость со старыми строками")
