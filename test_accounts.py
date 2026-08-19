@@ -32,6 +32,7 @@ def _isolate(tmp: Path):
     users.LEGACY_EMPLOYEES_PATH = tmp / "employees.json"
     db.configure(TEST_DSN)
     db.init_schema()
+    db.execute("DELETE FROM sessions")
     db.execute("DELETE FROM users")
 
 

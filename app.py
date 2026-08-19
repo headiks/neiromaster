@@ -87,6 +87,7 @@ HISTORY_MAX_STORE = 20  # сколько реплик хранить на сес
 
 _history_lock = threading.Lock()
 _conversation_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=HISTORY_MAX_STORE))
+_session_owner: dict[str, str] = {}   # session_id -> user_id первого владельца сессии
 
 
 def get_recent_history(session_id: str, n: int = HISTORY_WINDOW) -> list:
@@ -95,9 +96,11 @@ def get_recent_history(session_id: str, n: int = HISTORY_WINDOW) -> list:
     return hist[-n:]
 
 
-def append_history(session_id: str, question: str, answer: str | None):
+def append_history(session_id: str, question: str, answer: str | None, owner_id: str | None = None):
     with _history_lock:
         _conversation_history[session_id].append({"question": question, "answer": answer})
+        if owner_id and session_id not in _session_owner:
+            _session_owner[session_id] = owner_id
 
 
 # ---------- Доступ ----------
@@ -170,6 +173,7 @@ def _set_session_cookie(response: Response, token: str):
         auth.COOKIE_NAME, token,
         httponly=True,          # кука недоступна из JS — защита от кражи через XSS
         samesite="lax",         # браузер не пришлёт её при кросс-сайтовых POST — базовая защита от CSRF
+        secure=auth.COOKIE_SECURE,  # только по HTTPS — токен не утечёт по чистому HTTP (MITM)
         max_age=auth.SESSION_TTL,
         path="/",
     )
@@ -353,7 +357,7 @@ async def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
         result = _route_to_human(result, user)
         result["elapsed_time"] = time.time() - start
         result["session_id"] = session_id
-        append_history(session_id, question, result.get("answer"))
+        append_history(session_id, question, result.get("answer"), owner_id=user["id"])
         return QuestionResponse(**result)
     except Exception as e:
         return QuestionResponse(
@@ -369,12 +373,17 @@ async def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
         )
 
 
-@app.delete("/session/{session_id}", dependencies=logged_in)
-async def reset_session(session_id: str):
-    """Очищает историю диалога для сессии (например, при нажатии «Новый диалог» на сайте)."""
+@app.delete("/session/{session_id}")
+async def reset_session(session_id: str, user: dict = Depends(require_setup_done)):
+    """Очищает историю диалога для сессии (например, при нажатии «Новый диалог» на сайте).
+    Чужую сессию чистить нельзя — иначе любой вошедший стирал бы историю по чужому id."""
     with _history_lock:
+        owner = _session_owner.get(session_id)
+        if owner and owner != user["id"]:
+            raise HTTPException(status_code=403, detail="Это не ваша сессия")
         existed = session_id in _conversation_history
         _conversation_history.pop(session_id, None)
+        _session_owner.pop(session_id, None)
     return {"session_id": session_id, "cleared": existed}
 
 
@@ -572,7 +581,10 @@ EXPORT_FILES = {
 async def export_plan(plan_id: str, name: str):
     if name not in EXPORT_FILES:
         raise HTTPException(status_code=400, detail=f"Доступны: {', '.join(EXPORT_FILES)}")
-    path = planner.plan_dir(plan_id) / name
+    try:
+        path = planner.plan_dir(plan_id) / name
+    except ValueError:
+        raise HTTPException(status_code=404, detail="План не найден")
     if not path.exists():
         raise HTTPException(status_code=404, detail="Файл ещё не сформирован")
     media_type, _ = EXPORT_FILES[name]

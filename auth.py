@@ -6,27 +6,38 @@
     - защита от перебора;
     - выдача и проверка токена сессии.
 
-Сессии живут в памяти процесса: перезапуск сервера = перелогин. Этого достаточно
-для одного uvicorn-воркера во внутренней сети; для многопроцессного деплоя сессии
-нужно вынести в Redis или аналог.
+Сессии хранятся в PostgreSQL (таблица sessions, см. db.py): переживают перезапуск
+сервера (пользователей не разлогинивает) и общие для всех uvicorn-воркеров.
+Защита от перебора (лок-аут) остаётся в памяти процесса — она короткоживущая и
+сбрасывается при рестарте, это допустимо.
 """
 
+import os
 import time
 import secrets
 import threading
 from typing import Optional
 
+import db
 import users
 
 COOKIE_NAME = "nm_session"
 SESSION_TTL = 12 * 3600          # сколько живёт сессия без активности
 
-# Защита от перебора: после LOCKOUT_ATTEMPTS неудач вход блокируется на LOCKOUT_SECONDS
+# Флаг Secure у cookie сессии: по умолчанию ВКЛ (токен не уходит по чистому HTTP).
+# Для локальной разработки без TLS выключается NEIROMASTER_INSECURE_COOKIE=1.
+COOKIE_SECURE = os.environ.get("NEIROMASTER_INSECURE_COOKIE", "").lower() not in ("1", "true", "yes")
+
+# Защита от перебора: после LOCKOUT_ATTEMPTS неудач вход блокируется на LOCKOUT_SECONDS.
+# Ключ — САМ логин, а не (IP, логин): иначе распределённый перебор с ротацией IP
+# получал бы свежий лимит на каждый адрес и обходил защиту полностью.
+# ponytail: обратная сторона — таргетированный лок-аут (10 неудач по чужому логину
+# блокируют его вход на 5 мин). Для внутреннего инструмента приемлемо; при росту
+# поверхности — капча/экспоненциальная задержка вместо жёсткой блокировки.
 LOCKOUT_ATTEMPTS = 10
 LOCKOUT_SECONDS = 300
 
 _lock = threading.Lock()
-_sessions: dict = {}
 _failures: dict = {}
 
 
@@ -58,7 +69,7 @@ def login(username: str, password: str, client: str = "") -> tuple:
     Возвращает (токен сессии, пользователь) либо поднимает ValueError с причиной отказа.
     """
     username = (username or "").strip().lower()
-    key = f"{client}|{username}"
+    key = username    # лок-аут по аккаунту, независимо от IP (см. LOCKOUT_ATTEMPTS)
 
     with _lock:
         locked_for = _is_locked(key)
@@ -82,8 +93,12 @@ def login(username: str, password: str, client: str = "") -> tuple:
 
     with _lock:
         _failures.pop(key, None)
-        token = secrets.token_urlsafe(32)
-        _sessions[token] = {"user_id": user["id"], "created": time.time(), "seen": time.time()}
+
+    now = time.time()
+    token = secrets.token_urlsafe(32)
+    db.execute("INSERT INTO sessions (token, user_id, created_at, seen_at) VALUES (%s, %s, %s, %s)",
+               (token, user["id"], now, now))
+    db.execute("DELETE FROM sessions WHERE seen_at < %s", (now - SESSION_TTL,))  # чистим протухшие
     return token, user
 
 
@@ -95,20 +110,18 @@ def get_session_user(token: Optional[str]) -> Optional[dict]:
     """
     if not token:
         return None
-    with _lock:
-        session = _sessions.get(token)
-        if not session:
-            return None
-        if time.time() - session["seen"] > SESSION_TTL:
-            _sessions.pop(token, None)
-            return None
-        session["seen"] = time.time()
-        user_id = session["user_id"]
+    now = time.time()
+    session = db.query("SELECT user_id, seen_at FROM sessions WHERE token = %s", (token,), "one")
+    if not session:
+        return None
+    if now - session["seen_at"] > SESSION_TTL:
+        db.execute("DELETE FROM sessions WHERE token = %s", (token,))
+        return None
+    db.execute("UPDATE sessions SET seen_at = %s WHERE token = %s", (now, token))
 
-    user = users.get_user(user_id)
+    user = users.get_user(session["user_id"])
     if not user or not user.get("active"):
-        with _lock:
-            _sessions.pop(token, None)
+        db.execute("DELETE FROM sessions WHERE token = %s", (token,))
         return None
     return user
 
@@ -116,16 +129,12 @@ def get_session_user(token: Optional[str]) -> Optional[dict]:
 def logout(token: Optional[str]):
     if not token:
         return
-    with _lock:
-        _sessions.pop(token, None)
+    db.execute("DELETE FROM sessions WHERE token = %s", (token,))
 
 
 def drop_user_sessions(user_id: str):
     """Разлогинить пользователя везде — после смены пароля или снятия прав."""
-    with _lock:
-        for token, session in list(_sessions.items()):
-            if session["user_id"] == user_id:
-                _sessions.pop(token, None)
+    db.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
 
 
 def change_own_password(user: dict, old_password: str, new_password: str):

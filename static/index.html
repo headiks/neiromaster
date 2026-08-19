@@ -437,7 +437,7 @@
 
         function renderResult(data) {
             if (data.error) {
-                resultDiv.innerHTML = `<div class="error">❌ ${data.error}</div>`;
+                resultDiv.innerHTML = `<div class="error">❌ ${escapeHtml(data.error)}</div>`;
                 return;
             }
 
