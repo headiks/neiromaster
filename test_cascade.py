@@ -3,7 +3,8 @@ import json
 import re
 import time
 
-import topics
+import classify
+import folders
 
 # ---------- Конфигурация ----------
 OLLAMA = "http://localhost:8080"
@@ -267,26 +268,85 @@ def classify(question):
         return {"route": "rag", "risk_flag": False, "risk_type": None}
 
 # ---------- Поиск в Qdrant ----------
-def search(question, limit=3, topic_slugs=None):
-    log("SEARCH", f"Поиск в Qdrant для вопроса: {question}, лимит {limit}, темы: {topic_slugs or '(все)'}")
-    start = time.time()
+def search(question, limit=6, folder_slugs=None):
+    """Векторный поиск чанков; при folder_slugs — только внутри этих папок (метка
+    payload.folders, массив). Без folder_slugs — по всей общей базе «Все документы»."""
     vector = embed(question)
     payload = {"query": vector, "limit": limit, "with_payload": True}
-    # Если тема(ы) определены — ищем ТОЛЬКО среди чанков этих папок, а не по всей базе.
-    # Это и есть суть маршрутизации: не отдаём модели весь корпус документов,
-    # а только те, что физически лежат в нужной теме.
-    if topic_slugs:
-        payload["filter"] = {"must": [{"key": "topic", "match": {"any": topic_slugs}}]}
-    log("SEARCH", f"Отправка запроса в Qdrant: {payload}")
+    if folder_slugs:
+        payload["filter"] = {"must": [{"key": "folders", "match": {"any": folder_slugs}}]}
     r = requests.post(f"{QDRANT}/collections/{COLLECTION}/points/query", json=payload, timeout=QDRANT_TIMEOUT)
     r.raise_for_status()
-    response = r.json()
-    points = response["result"]["points"]
-    elapsed = time.time() - start
-    log("SEARCH", f"Найдено {len(points)} кандидатов за {elapsed:.3f} сек")
-    for idx, p in enumerate(points):
-        log("SEARCH", f"Кандидат {idx+1}: score={p['score']:.3f}, тема={p['payload'].get('topic')}, текст: {p['payload']['text'][:80]}...")
+    points = r.json()["result"]["points"]
+    log("SEARCH", f"папки {folder_slugs or '(вся база)'}: {len(points)} кандидатов")
     return points
+
+
+# ---------- Многоуровневый поиск (ТЗ §18–23) ----------
+RETRIEVE_MIN = 3   # достаточно кандидатов — не расширяем поиск на следующий уровень
+
+
+def _folders_for_stages(stage_ids):
+    if not stage_ids:
+        return []
+    sset = set(stage_ids)
+    try:
+        return [f["slug"] for f in folders.list_folders(include_disabled=False)
+                if sset & set(f.get("stage_ids") or [])]
+    except Exception:
+        return []
+
+
+def _merge(dst, src):
+    seen = {d["id"] for d in dst}
+    for p in src:
+        if p["id"] not in seen:
+            seen.add(p["id"])
+            dst.append(p)
+    return dst
+
+
+def fetch_neighbors(source, chunk_index, span=1):
+    """Соседние чанки того же документа (L2, ТЗ §20): проверяем контекст вокруг
+    найденного фрагмента — исключения, ограничения, уточнения рядом."""
+    if chunk_index is None:
+        return []
+    payload = {"limit": 2 * span + 2, "with_payload": True, "filter": {"must": [
+        {"key": "source", "match": {"value": source}},
+        {"key": "chunk_index", "range": {"gte": chunk_index - span, "lte": chunk_index + span}},
+    ]}}
+    try:
+        r = requests.post(f"{QDRANT}/collections/{COLLECTION}/points/scroll", json=payload, timeout=QDRANT_TIMEOUT)
+        r.raise_for_status()
+        pts = r.json()["result"]["points"]
+        return [(p["payload"].get("raw_text") or p["payload"].get("text", "")) for p in pts]
+    except Exception:
+        return []
+
+
+def cascade_search(question, current_stage_ids=None, limit=8):
+    """L1 релевантные папки -> L3 папки текущего этапа -> L4 вся база. Приоритет —
+    свежесть документа и текущий этап (буст, не жёсткий фильтр — ТЗ §6, §24)."""
+    matched = classify.match_folders(question, top_k=3, threshold=0.3)
+    folder_slugs = [m[0] for m in matched]
+    cands = search(question, limit=limit, folder_slugs=folder_slugs or None)
+
+    if len(cands) < RETRIEVE_MIN and current_stage_ids:
+        stage_folders = _folders_for_stages(current_stage_ids)
+        if stage_folders:
+            cands = _merge(cands, search(question, limit=limit, folder_slugs=stage_folders))
+
+    if len(cands) < RETRIEVE_MIN:
+        cands = _merge(cands, search(question, limit=limit, folder_slugs=None))
+
+    sset = set(current_stage_ids or [])
+    for p in cands:
+        pl = p.get("payload") or {}
+        boost = 0.05 if sset & set(pl.get("stage_ids") or []) else 0.0
+        p["_adj"] = p["score"] + boost
+        p["_when"] = pl.get("uploaded_at") or ""
+    cands.sort(key=lambda p: (p["_adj"], p["_when"]), reverse=True)
+    return cands[:max(limit, 6)]
 
 # ---------- Реранжирование (максимально усиленный промпт) ----------
 RERANK_SYSTEM = """
@@ -387,12 +447,12 @@ def generate_answer(question, context_fragments):
     return answer
 
 # ---------- Основная функция ----------
-def handle_question(question, history=None):
+def handle_question(question, history=None, current_stage_ids=None):
     """
     history — список предыдущих реплик текущего диалога вида
     [{"question": "...", "answer": "..."}, ...] от старых к новым.
-    Обычно передаётся вызывающей стороной (app.py) уже обрезанным до последних
-    HISTORY_WINDOW вопросов, но на всякий случай обрезаем и здесь.
+    current_stage_ids — id этапов текущего этапа обучения пользователя (из прогресса);
+    используются как приоритет поиска, но не ограничивают его (ТЗ §6).
     """
     log("START", f"Обработка вопроса: {question}")
     total_start = time.time()
@@ -408,19 +468,12 @@ def handle_question(question, history=None):
     route = route_info["route"]
     log("HANDLE", f"Маршрут: {route}")
 
-    # Маршрутизация по темам — только для route == "rag" имеет смысл (экономим
-    # вызов, если вопрос всё равно не пойдёт в поиск по документам).
-    matched_topics = []
-    if route == "rag":
-        matched_topics = topics.route_question(effective_question)
-
     base_result = {
         "question": question,
         "resolved_question": effective_question if context_used else None,
         "context_used": context_used,
         "classification": route_info,
         "route": route,
-        "topics_used": matched_topics,
     }
 
     if route == "general":
@@ -443,12 +496,7 @@ def handle_question(question, history=None):
             "error": None
         }
 
-    candidates = search(effective_question, topic_slugs=matched_topics)
-    if not candidates and matched_topics:
-        # Тема была выбрана неуверенно/ошибочно — не отдаём пользователю пустой
-        # ответ только из-за неверной папки, ищем по всей базе как fallback.
-        log("HANDLE", "В выбранных темах пусто, повторяем поиск без фильтра по темам")
-        candidates = search(effective_question, topic_slugs=None)
+    candidates = cascade_search(effective_question, current_stage_ids=current_stage_ids)
     if not candidates:
         return {
             **base_result,
@@ -463,9 +511,19 @@ def handle_question(question, history=None):
     top = [r for r in ranked if r["relevance"] >= CONFIDENCE_THRESHOLD]
     top_fragments = [r["text"] for r in top[:MAX_CONTEXT_FRAGMENTS]]
 
+    # L2 — контекст исходных документов: добавляем соседние чанки лучших фрагментов,
+    # чтобы не отвечать по вырванному куску без учёта исключений/ограничений рядом.
+    context_fragments = list(top_fragments)
+    for cand in candidates[:MAX_CONTEXT_FRAGMENTS]:
+        pl = cand.get("payload") or {}
+        if pl.get("text") in top_fragments:
+            for neigh in fetch_neighbors(pl.get("source"), pl.get("chunk_index")):
+                if neigh and neigh not in context_fragments:
+                    context_fragments.append(neigh)
+
     answer = None
     if top_fragments:
-        answer = generate_answer(effective_question, top_fragments)
+        answer = generate_answer(effective_question, context_fragments)
     else:
         log("HANDLE", "Confidence gate не пройден")
 

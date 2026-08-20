@@ -76,6 +76,38 @@ SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
+    # Смысловые папки — логические категории базы знаний, которыми управляет
+    # ТОЛЬКО человек (ИИ классифицирует документы внутрь, но не создаёт папки).
+    # Папка не хранит файлов: criteria — набор смысловых критериев отнесения,
+    # stage_ids — связанные этапы обучения. Оба поля JSONB-массивы строк.
+    """
+    CREATE TABLE IF NOT EXISTS folders (
+        id          TEXT PRIMARY KEY,
+        slug        TEXT UNIQUE NOT NULL,
+        name        TEXT    NOT NULL,
+        description TEXT    NOT NULL DEFAULT '',
+        criteria    JSONB   NOT NULL DEFAULT '[]',
+        stage_ids   JSONB   NOT NULL DEFAULT '[]',
+        enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at  TEXT,
+        updated_at  TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_folders_enabled ON folders(enabled)",
+    # Этапы обучения (блоки) и их подэтапы — «структура обучения» из ТЗ. Задаёт
+    # контекст текущего этапа пользователя и цель для связей папок (folders.stage_ids).
+    # substages — JSONB-массив объектов {id, title}.
+    """
+    CREATE TABLE IF NOT EXISTS stages (
+        id          TEXT PRIMARY KEY,
+        title       TEXT    NOT NULL,
+        description TEXT    NOT NULL DEFAULT '',
+        substages   JSONB   NOT NULL DEFAULT '[]',
+        position    INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT,
+        updated_at  TEXT
+    )
+    """,
 )
 
 

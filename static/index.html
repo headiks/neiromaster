@@ -437,6 +437,8 @@
             });
         }
 
+        // Ответ сотруднику: только сам ответ. Источники, названия документов,
+        // маршрут, фрагменты, тайминги и прочая внутренняя механика не показываются (ТЗ §25).
         function renderResult(data) {
             if (data.error) {
                 resultDiv.innerHTML = `<div class="error"><i data-lucide="triangle-alert"></i> ${escapeHtml(data.error)}</div>`;
@@ -446,55 +448,16 @@
 
             let html = `<div class="card"><h3>${escapeHtml(data.question)}</h3>`;
 
-            if (data.context_used && data.resolved_question) {
-                html += `<div class="context-note"><i data-lucide="link-2"></i> Понято с учётом предыдущих вопросов как: «${escapeHtml(data.resolved_question)}»</div>`;
-            }
-
-            const cls = data.classification;
-            const route = data.route || 'unknown';
-            const badgeClass = route === 'escalate' ? 'escalate' : route === 'rag' ? 'rag' : route === 'general' ? 'general' : 'scenario';
-            html += `<div><span class="badge ${badgeClass}">${route}</span>`;
-            if (cls.risk_flag) {
-                html += ` <span class="status-badge error"><i data-lucide="triangle-alert"></i> ${cls.risk_type || 'риск'}</span>`;
-            }
-            html += `</div>`;
-
             if (data.answer) {
-                html += `<div style="margin-top:16px;"><strong><i data-lucide="bot"></i> Ответ:</strong>
-                    <div class="answer">${escapeHtml(data.answer)}</div>
-                </div>`;
+                html += `<div style="margin-top:12px;"><div class="answer">${escapeHtml(data.answer)}</div></div>`;
+            } else if (data.route === 'escalate') {
+                html += `<p style="margin-top:12px;"><i data-lucide="user-round"></i> Вопрос передан специалисту — ответ появится в разделе «Мои вопросы специалисту».</p>`;
+            } else if (data.route === 'general') {
+                html += `<p style="margin-top:12px;">Здравствуйте! Задайте вопрос по работе, регламентам или безопасности.</p>`;
             } else {
-                if (route === 'general') {
-                    html += `<p style="margin-top:12px;">Обработано как общее приветствие. (Ответ не сгенерирован)</p>`;
-                } else if (route === 'escalate') {
-                    html += `<p style="margin-top:12px;"><i data-lucide="triangle-alert"></i> Маршрут <strong>эскалация</strong> — запрос передан специалисту.</p>`;
-                } else if (route === 'scenario') {
-                    html += `<p style="margin-top:12px;"><i data-lucide="book-open"></i> Учебный сценарий — обработка в отдельном модуле.</p>`;
-                } else if (route === 'rag') {
-                    if (data.top_fragments && data.top_fragments.length === 0) {
-                        html += `<div style="margin-top:16px;color:var(--muted);"><i data-lucide="info"></i> Недостаточно уверенности для генерации (confidence gate).</div>`;
-                    } else {
-                        html += `<p style="margin-top:12px;">Поиск не дал релевантных фрагментов.</p>`;
-                    }
-                } else {
-                    html += `<p style="margin-top:12px;">Неизвестный маршрут.</p>`;
-                }
+                html += `<p style="margin-top:12px;">Не нашёл точного ответа в базе. Уточните вопрос или обратитесь к наставнику — при необходимости он передаст его специалисту.</p>`;
             }
 
-            if (route === 'rag' && data.candidates && data.candidates.length) {
-                html += `<div style="margin-top:12px;"><strong><i data-lucide="search"></i> Найденные фрагменты:</strong>`;
-                data.candidates.forEach((c, i) => {
-                    const isTop = i < data.top_fragments.length;
-                    html += `<div class="candidate ${isTop ? 'relevant' : ''}">
-                        <div><span class="score">${c.relevance.toFixed(2)}</span>
-                        (vector: ${c.vector_score.toFixed(3)})</div>
-                        <div class="text">${escapeHtml(c.text)}</div>
-                    </div>`;
-                });
-                html += `</div>`;
-            }
-
-            html += `<div class="time"><i data-lucide="timer"></i> Время: ${data.elapsed_time.toFixed(2)} сек</div>`;
             html += `</div>`;
             resultDiv.innerHTML = html;
             refreshIcons();
@@ -503,12 +466,10 @@
         function addHistory(data) {
             const entry = document.createElement('div');
             entry.className = 'history-item';
-            const answerText = data.answer || (data.route === 'escalate' ? 'Эскалация' : 'Нет ответа');
-            const contextTag = data.context_used ? ' • с учётом контекста' : '';
+            const answerText = data.answer || (data.route === 'escalate' ? 'Передано специалисту' : 'Ответ не найден');
             entry.innerHTML = `
                 <div class="q"><i data-lucide="message-square-text"></i> ${escapeHtml(data.question)}</div>
                 <div class="a">${escapeHtml(answerText)}</div>
-                <div style="font-size:12px;color:var(--muted);">${data.elapsed_time.toFixed(2)} сек • ${data.route || 'unknown'}${contextTag}</div>
             `;
             historyList.prepend(entry);
             refreshIcons();

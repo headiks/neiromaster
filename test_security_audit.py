@@ -33,7 +33,8 @@ def _stub(name: str):
 
 
 def _load_test_cascade():
-    _stub("topics")                       # test_cascade делает `import topics`
+    _stub("classify")                     # test_cascade делает `import classify`, `import folders`
+    _stub("folders")
     return importlib.import_module("test_cascade")
 
 

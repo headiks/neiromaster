@@ -564,19 +564,20 @@ def _substage_query(stage: dict, substage: dict) -> str:
 
 def pick_topics(stage: dict, substage: dict, topic_list: list) -> list:
     """
-    LLM выбирает темы базы знаний под подэтап. Возвращает slug'и тем.
-    Фолбэк — все темы с документами (поиск без сужения).
+    LLM выбирает смысловые папки базы знаний под подэтап. Возвращает slug'и папок.
+    Фолбэк — все включённые папки (поиск без сужения). topic_list — список папок
+    (folders.list_folders): slug, name, description, criteria.
     """
     from test_cascade import small_llm, parse_json_response
 
-    available = [t for t in topic_list if t.get("doc_count")]
+    available = list(topic_list or [])
     if not available:
         return []
     slugs = {t["slug"].casefold(): t["slug"] for t in available}
 
     topic_lines = "\n".join(
         f"- {t['slug']} — {t.get('name', '')}: {t.get('description', '')} "
-        f"[{', '.join(t.get('keywords') or [])}]"
+        f"[{'; '.join(t.get('criteria') or [])}]"
         for t in available
     )
     user = (
@@ -609,7 +610,7 @@ def generate_substage_message(stage: dict, substage: dict, topic_list: list) -> 
         result["topics_used"] = picked
 
         chunks = indexing.search_chunks(_substage_query(stage, substage), picked, limit=CONTEXT_CHUNKS)
-        result["sources"] = [{"source": c["source"], "topic": c["topic"],
+        result["sources"] = [{"source": c["source"], "folders": c.get("folders") or [],
                               "page": c["page"], "score": round(c["score"], 3)} for c in chunks]
 
         if not chunks:
@@ -618,7 +619,7 @@ def generate_substage_message(stage: dict, substage: dict, topic_list: list) -> 
             return result
 
         context = "\n\n".join(
-            f"--- Фрагмент {i + 1} (тема: {c['topic']}, документ: {c['source']}) ---\n{c['text']}"
+            f"--- Фрагмент {i + 1} (документ: {c['source']}) ---\n{c['text']}"
             for i, c in enumerate(chunks)
         )
         user = (
@@ -696,7 +697,7 @@ def get_job(job_id: str) -> Optional[dict]:
 
 def start_generation(plan: dict) -> dict:
     """Запускает генерацию всех подэтапов плана в фоне, возвращает описание задачи."""
-    import topics
+    import folders
 
     job_id = str(uuid.uuid4())
     items = resolve_schedule(plan)
@@ -709,7 +710,7 @@ def start_generation(plan: dict) -> dict:
         generated = {}
         errors = 0
         try:
-            topic_list = topics.list_topics()
+            topic_list = folders.list_folders(include_disabled=False)
             stages_by_id = {s["id"]: s for s in plan.get("stages") or []}
             for index, item in enumerate(items, start=1):
                 stage = stages_by_id.get(item["stage"]["id"], {})
@@ -747,7 +748,7 @@ def regenerate_one(plan: dict, message_id: str) -> Optional[dict]:
     Перегенерирует один подэтап и обновляет сохранённое расписание.
     Возвращает обновлённое сообщение или None, если подэтап не найден.
     """
-    import topics
+    import folders
 
     items = {i["message_id"]: i for i in resolve_schedule(plan)}
     item = items.get(message_id)
@@ -759,7 +760,7 @@ def regenerate_one(plan: dict, message_id: str) -> Optional[dict]:
     if substage is None:
         return None
 
-    payload = generate_substage_message(stage, substage, topics.list_topics())
+    payload = generate_substage_message(stage, substage, folders.list_folders(include_disabled=False))
 
     schedule = load_schedule(plan["plan_id"])
     if schedule is None:
