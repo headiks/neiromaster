@@ -1,26 +1,22 @@
 """
-Общая логика индексации регламентов: docling-конвертация -> автосортировка по
-темам (папкам) -> смысловой чанкинг -> эмбеддинги -> Qdrant. Используется и
-CLI-скриптом (index_documents.py), и веб-приложением (app.py, ручка загрузки).
+Индексация документов по модели «человек управляет структурой, ИИ классифицирует
+внутрь неё» (см. ТЗ). Используется CLI (index_documents.py) и веб-приложением (app.py).
 
 Путь документа от загрузки до готовности к нейропоиску:
 
-    оригинал (pdf/docx/...), лежит в data/documents/ (пока без темы)
+    оригинал (pdf/docx/...), хранится ОДИН раз плоско в data/documents/
         -> DocumentConverter (docling): разбор макета, таблиц, заголовков
-        -> DoclingDocument (кэшируется как JSON в data/processed —
-           не гоняем повторно тяжёлый layout-анализ PDF при переиндексации)
-        -> topics.classify_document(): определяем тему по краткому содержанию
-           -> файл переезжает в data/documents/<тема>/, markdown-версия
-              сохраняется в data/converted/<тема>/ (таблицы в MD читаемы для ИИ)
-        -> HybridChunker: смысловые чанки с учётом токенного бюджета
-        -> contextualize(): к каждому чанку приклеивается путь заголовков
-        -> эмбеддинг (bge-m3) -> вектор, в payload добавляется "topic": <slug>
-        -> Qdrant: HNSW-индекс по векторам, чанки помечены темой — при вопросе
-           сначала выбираются нужные темы (topics.route_question), а поиск по
-           чанкам идёт только среди них, а не по всей базе
+           (DoclingDocument кэшируется как JSON в data/processed)
+        -> classify.summarize_document(): краткое смысловое описание документа
+        -> classify.find_similar_docs(): поиск похожих (дубли/противоречия)
+        -> classify.classify_document(): отнесение к СУЩЕСТВУЮЩИМ папкам (по смыслу)
+        -> HybridChunker + перекрытие: смысловые чанки с сохранением контекста границ
+        -> classify.classify_chunk(): мульти-лейбл метки папок и этапов у каждого чанка
+        -> эмбеддинг (bge-m3) -> Qdrant, payload: folders[], stage_ids[], summary, uploaded_at
 
-Установка зависимостей:
-    pip install docling qdrant-client requests fastapi uvicorn python-multipart
+Папка — логическая метка, а не физическая директория: документ и его чанки могут
+относиться к нескольким папкам сразу, а все документы всегда попадают в общую базу
+«Все документы» (вся коллекция) независимо от папок.
 """
 
 import re
@@ -44,12 +40,19 @@ from docling.document_converter import DocumentConverter
 from docling.chunking import HybridChunker
 from docling_core.types.doc.document import DoclingDocument
 
-import topics
+import classify
+import folders
 from config import (
     DOCS_DIR, CONVERTED_DIR, CACHE_DIR, REGISTRY_PATH,
     SUPPORTED_EXT, MAX_UPLOAD_BYTES,
     QDRANT_HOST, QDRANT_PORT, EMBED_DIM, get_embedding,
 )
+
+# Символическое перекрытие между соседними чанками (ТЗ §12): в текст для эмбеддинга
+# следующего чанка добавляется «хвост» предыдущего, чтобы информация на границе не
+# терялась. Доля от чанка, а не жёсткое число — грубая, но рабочая эвристика.
+# ponytail: фиксированная доля; при желании стратегию можно усложнить под модель/структуру.
+OVERLAP_CHARS = 240
 
 # ---------- Qdrant (основная коллекция чанков) ----------
 COLLECTION_NAME = "reglaments"
@@ -103,46 +106,28 @@ def list_documents() -> list:
     return sorted(reg.values(), key=lambda e: e.get("uploaded_at", ""), reverse=True)
 
 
-def folder_stats() -> list:
-    """Сводка смысловых папок для панели администратора.
+def set_clarification(filename: str, text: str) -> bool:
+    """Сохраняет текстовое уточнение пользователя к документу (ТЗ §17). Исходный
+    документ не меняется — уточнение хранится в реестре как доп. контекст."""
+    with _registry_lock:
+        reg = _load_registry()
+        if filename not in reg:
+            return False
+        reg[filename]["clarification"] = text
+        _save_registry(reg)
+    return True
 
-    Источник истины о количестве файлов и чанков — реестр документов: он
-    доступен и во время обработки, когда значения в Qdrant ещё не обновились.
-    Метаданные папок (название и описание) берём из коллекции тем.
-    """
+
+def folder_doc_counts() -> dict:
+    """slug папки -> сколько документов к ней отнесено (по реестру). Папка —
+    логическая метка, документ может входить сразу в несколько папок."""
     with _registry_lock:
         registry = _load_registry()
-
-    stats: dict[str, dict] = {}
-    try:
-        for topic in topics.list_topics():
-            slug = topic.get("slug")
-            if not slug:
-                continue
-            stats[slug] = {
-                "slug": slug,
-                "name": topic.get("name") or slug,
-                "description": topic.get("description") or "",
-                "documents": 0,
-                "chunks": 0,
-            }
-    except Exception as exc:
-        # Не скрываем уже обработанные документы, если Qdrant временно недоступен.
-        _log("FOLDERS", f"Не удалось получить метаданные папок: {exc}")
-
-    for document in registry.values():
-        slug = document.get("topic") or "unclassified"
-        folder = stats.setdefault(slug, {
-            "slug": slug,
-            "name": document.get("topic_name") or "Без категории",
-            "description": "",
-            "documents": 0,
-            "chunks": 0,
-        })
-        folder["documents"] += 1
-        folder["chunks"] += int(document.get("chunks") or 0)
-
-    return sorted(stats.values(), key=lambda folder: folder["name"].casefold())
+    counts: dict[str, int] = {}
+    for doc in registry.values():
+        for slug in doc.get("folders") or []:
+            counts[slug] = counts.get(slug, 0) + 1
+    return counts
 
 
 # ---------- Вспомогательные функции ----------
@@ -166,7 +151,8 @@ def file_hash(path: Path) -> str:
 # заметно медленнее. Индекс делает отбор по теме/источнику почти бесплатным,
 # поэтому двухступенчатый поиск (сначала темы, потом чанки внутри них) масштабируется.
 PAYLOAD_INDEXES = {
-    "topic": PayloadSchemaType.KEYWORD,
+    "folders": PayloadSchemaType.KEYWORD,    # массив slug'ов — MatchAny фильтрует по папкам
+    "stage_ids": PayloadSchemaType.KEYWORD,  # массив id этапов — для приоритезации по текущему этапу
     "source": PayloadSchemaType.KEYWORD,
     "section": PayloadSchemaType.KEYWORD,
 }
@@ -188,14 +174,14 @@ def create_collection(recreate: bool = False):
             client.delete_collection(COLLECTION_NAME)
         else:
             ensure_payload_indexes()
-            topics.ensure_topics_collection()
+            classify.ensure_collections()
             return
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
     )
     ensure_payload_indexes()
-    topics.ensure_topics_collection()
+    classify.ensure_collections()
 
 
 def extract_page_no(chunk) -> Optional[int]:
@@ -221,12 +207,6 @@ def convert_document(filepath: Path) -> DoclingDocument:
     doc = result.document
     doc.save_as_json(str(cache_path))
     return doc
-
-
-def _doc_gist(markdown_text: str, filename: str) -> str:
-    """Краткое содержание документа для классификации по темам: имя файла +
-    начало markdown-версии (обычно там заголовок и первые разделы)."""
-    return f"Файл: {filename}\n\n{markdown_text[:1500]}"
 
 
 # Номер пункта регламента в начале строки: «5», «5.1», «5.1.2», с точкой или скобкой.
@@ -257,45 +237,48 @@ def sectionize_by_clause(text: str) -> list:
 
 # ---------- Индексация одного документа ----------
 def index_document(filepath: Path) -> dict:
+    """
+    Приём документа по новой модели (ТЗ §9–14):
+      сохранённый оригинал (плоско в data/documents/) -> docling
+      -> краткое смысловое описание (classify.summarize_document)
+      -> проверка похожих документов (дубли/противоречия)
+      -> смысловой чанкинг с перекрытием
+      -> мульти-лейбл классификация чанков в СУЩЕСТВУЮЩИЕ папки (по вектору)
+      -> Qdrant (payload: folders[], stage_ids[], summary, uploaded_at)
+    Файл физически один; папка — логическая метка. Все документы попадают в общую
+    базу «Все документы» (вся коллекция) независимо от того, отнеслись ли они к папкам.
+    """
     filename = filepath.name
     _update_registry(filename, status="processing", error=None)
 
     try:
         start = time.time()
         doc = convert_document(filepath)
-        markdown_text = doc.export_to_markdown()  # таблицы -> markdown-таблицы, лучший формат для LLM
+        markdown_text = doc.export_to_markdown()
 
-        # ---- Определяем тему (папку) ----
-        if filepath.parent == DOCS_DIR:
-            # Файл только что загружен и лежит в корне data/documents — сортируем автоматически
-            gist = _doc_gist(markdown_text, filename)
-            topic = topics.classify_document(gist)
-        else:
-            # Файл уже лежит в подпапке (загружен раньше или разложен вручную) — уважаем это
-            topic = {"slug": filepath.parent.name, "name": filepath.parent.name}
-            topics.register_manual_topic(topic["slug"])
-        slug = topic["slug"]
+        # ---- Краткое смысловое описание документа ----
+        summary = classify.summarize_document(markdown_text, filename)
+        uploaded_at = _load_registry().get(filename, {}).get("uploaded_at") or time.strftime("%Y-%m-%dT%H:%M:%S")
 
-        # ---- Переносим оригинал в data/documents/<тема>/, если он был в корне ----
-        target_path = DOCS_DIR / slug / filename
-        if filepath != target_path:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            filepath.replace(target_path)
-            filepath = target_path
+        # ---- Похожие/связанные документы (дубли, обновления, противоречия) ----
+        similar = classify.find_similar_docs(summary, exclude=filename)
 
-        # ---- Сохраняем читаемую markdown-версию (таблицы, заголовки) ----
-        md_path = CONVERTED_DIR / slug / f"{filepath.stem}.md"
-        md_path.parent.mkdir(parents=True, exist_ok=True)
+        # ---- Классификация документа в существующие папки ----
+        doc_cls = classify.classify_document(summary)
+        doc_folders = doc_cls["folders"]
+
+        # ---- Markdown-версия (плоско) ----
+        md_path = CONVERTED_DIR / f"{filepath.stem}.md"
         md_path.write_text(markdown_text, encoding="utf-8")
 
-        # Фиксируем тему/путь сразу — если дальше (чанкинг/эмбеддинги) что-то упадёт,
-        # delete_document всё равно будет знать, где физически лежит файл.
         _update_registry(
             filename,
-            topic=slug,
-            topic_name=topic["name"],
-            path=str(filepath.relative_to(DOCS_DIR)),
-            markdown_path=str(md_path.relative_to(CONVERTED_DIR)),
+            summary=summary,
+            folders=doc_folders,
+            stage_ids=doc_cls["stage_ids"],
+            similar=similar,
+            path=filename,
+            markdown_path=md_path.name,
         )
 
         # ---- Чанкинг ----
@@ -304,19 +287,16 @@ def index_document(filepath: Path) -> dict:
             _update_registry(filename, status="error", error="Не удалось выделить ни одного чанка")
             return {"filename": filename, "status": "error", "error": "Нет чанков"}
 
-        # Сносим предыдущие чанки этого файла (переиндексация при повторной загрузке)
-        delete_document_vectors(filename)
+        delete_document_vectors(filename)  # переиндексация: сносим прежние чанки
 
         src_hash = file_hash(filepath)
         points = []
         seg_index = 0
+        prev_tail = ""   # хвост предыдущего чанка для перекрытия контекста (ТЗ §12)
         for chunk in chunks:
             headings = list(getattr(chunk.meta, "headings", None) or [])
             page_no = extract_page_no(chunk)
 
-            # Посекционный чанкинг: делим по оформлению (заголовки docling), а где их
-            # нет — по номерам пунктов («5.1»). Каждый пункт становится отдельной точкой
-            # со своей меткой section — точнее и цитирование, и фильтрация в поиске.
             if headings:
                 section = " / ".join(h for h in headings if h)
                 segments = [(section, chunk.text, chunker.contextualize(chunk=chunk))]
@@ -326,10 +306,15 @@ def index_document(filepath: Path) -> dict:
                     for label, seg in sectionize_by_clause(chunk.text)
                 ]
 
-            for section, raw_text, text_for_embedding in segments:
+            for section, raw_text, base_text in segments:
                 if not (raw_text or "").strip():
                     continue
+                # Перекрытие: добавляем хвост предыдущего сегмента в текст для эмбеддинга.
+                text_for_embedding = (f"…{prev_tail}\n\n{base_text}" if prev_tail else base_text)
+                prev_tail = raw_text[-OVERLAP_CHARS:]
+
                 vec = get_embedding(text_for_embedding)
+                chunk_cls = classify.classify_chunk(base_text, doc_folders, vec=vec)
                 point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{filename}-{src_hash}-{seg_index}"))
                 points.append(PointStruct(
                     id=point_id,
@@ -338,12 +323,15 @@ def index_document(filepath: Path) -> dict:
                         "text": text_for_embedding,
                         "raw_text": raw_text,
                         "source": filename,
-                        "topic": slug,
+                        "folders": chunk_cls["folders"],
+                        "stage_ids": chunk_cls["stage_ids"],
                         "section": section,
                         "headings": headings,
                         "page": page_no,
                         "chunk_index": seg_index,
                         "length": len(text_for_embedding),
+                        "doc_summary": summary,
+                        "uploaded_at": uploaded_at,
                     }
                 ))
                 seg_index += 1
@@ -355,21 +343,18 @@ def index_document(filepath: Path) -> dict:
         for start_i in range(0, len(points), UPSERT_BATCH):
             client.upsert(collection_name=COLLECTION_NAME, points=points[start_i:start_i + UPSERT_BATCH])
 
+        # Вектор краткого описания — для будущего поиска похожих документов.
+        classify.upsert_doc_summary(filename, summary, uploaded_at)
+
         elapsed = time.time() - start
         _update_registry(
-            filename,
-            status="indexed",
-            chunks=len(points),
-            error=None,
-            indexed_in_seconds=round(elapsed, 2),
-            topic=slug,
-            topic_name=topic["name"],
-            path=str(filepath.relative_to(DOCS_DIR)),
-            markdown_path=str(md_path.relative_to(CONVERTED_DIR)),
+            filename, status="indexed", chunks=len(points), error=None,
+            indexed_in_seconds=round(elapsed, 2), folders=doc_folders,
+            stage_ids=doc_cls["stage_ids"], path=filename, markdown_path=md_path.name,
         )
-        _log("DONE", f"{filename}: {len(points)} чанков за {elapsed:.2f} сек, тема «{topic['name']}» ({slug})")
+        _log("DONE", f"{filename}: {len(points)} чанков за {elapsed:.2f} сек, папки: {doc_folders or '(общая база)'}")
         return {"filename": filename, "status": "indexed", "chunks": len(points),
-                "elapsed": elapsed, "topic": slug, "topic_name": topic["name"]}
+                "elapsed": elapsed, "folders": doc_folders, "similar": similar}
 
     except Exception as e:
         _update_registry(filename, status="error", error=str(e))
@@ -386,7 +371,7 @@ def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: in
     vector = get_embedding(query_text)
     query_filter = None
     if topic_slugs:
-        query_filter = Filter(must=[FieldCondition(key="topic", match=MatchAny(any=list(topic_slugs)))])
+        query_filter = Filter(must=[FieldCondition(key="folders", match=MatchAny(any=list(topic_slugs)))])
 
     hits = client.query_points(
         collection_name=COLLECTION_NAME,
@@ -399,7 +384,7 @@ def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: in
     return [{
         "text": h.payload.get("text", ""),
         "source": h.payload.get("source"),
-        "topic": h.payload.get("topic"),
+        "folders": h.payload.get("folders") or [],
         "section": h.payload.get("section"),
         "page": h.payload.get("page"),
         "score": h.score,
@@ -451,7 +436,8 @@ def get_document_chunks(filename: str) -> Optional[dict]:
             "section": payload.get("section"),
             "headings": payload.get("headings") or [],
             "page": payload.get("page"),
-            "topic": payload.get("topic"),
+            "folders": payload.get("folders") or [],
+            "stage_ids": payload.get("stage_ids") or [],
             "length": payload.get("length"),
             "text": payload.get("text", ""),          # то, что реально ушло в эмбеддинг
             "raw_text": payload.get("raw_text", ""),   # исходный текст пункта без контекста заголовков
@@ -472,8 +458,14 @@ def delete_document_vectors(filename: str):
 
 
 def delete_document(filename: str, remove_file: bool = True) -> bool:
-    """Полное удаление документа: векторы из Qdrant + оригинал + markdown-версия + кэш + запись в реестре."""
+    """Полное удаление документа: чанки из Qdrant + вектор описания + оригинал +
+    markdown-версия + кэш + запись в реестре. Папки (логические категории) при этом
+    не трогаются — удаляется сам документ, а не категория."""
     delete_document_vectors(filename)
+    try:
+        classify.delete_doc_summary(filename)
+    except Exception as e:
+        _log("DELETE", f"вектор описания {filename}: {e}")
 
     with _registry_lock:
         reg = _load_registry()
@@ -491,25 +483,38 @@ def delete_document(filename: str, remove_file: bool = True) -> bool:
             md_path = CONVERTED_DIR / md_rel
             if md_path.exists():
                 md_path.unlink()
-        if entry.get("topic"):
-            slug = entry["topic"]
-            topics.bump_doc_count(slug, -1)
-            # Убрали последний документ из смысловой папки — удаляем и саму папку/тему.
-            # Число файлов берём из реестра (источник истины, как в folder_stats),
-            # а не из doc_count темы, который может разойтись. Текущий файл ещё в
-            # реестре (удаляется ниже), поэтому исключаем его из проверки.
-            with _registry_lock:
-                reg_now = _load_registry()
-            still_used = any(name != filename and doc.get("topic") == slug
-                             for name, doc in reg_now.items())
-            if not still_used:
-                topics.delete_topic(slug)
 
     with _registry_lock:
         reg = _load_registry()
         existed = reg.pop(filename, None) is not None
         _save_registry(reg)
     return existed
+
+
+# ---------- Снятие метки папки с чанков (при удалении/выключении папки) ----------
+def strip_folder_from_chunks(slug: str):
+    """Убирает slug папки из payload всех чанков и из реестра документов. Документы
+    остаются в общей базе — удаляется только принадлежность к категории (ТЗ §3)."""
+    offset = None
+    while True:
+        batch, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(must=[FieldCondition(key="folders", match=MatchValue(value=slug))]),
+            limit=256, with_payload=True, offset=offset,
+        )
+        for p in batch:
+            payload = p.payload or {}
+            new_folders = [s for s in (payload.get("folders") or []) if s != slug]
+            client.set_payload(collection_name=COLLECTION_NAME, payload={"folders": new_folders},
+                               points=[p.id])
+        if offset is None:
+            break
+    with _registry_lock:
+        reg = _load_registry()
+        for doc in reg.values():
+            if slug in (doc.get("folders") or []):
+                doc["folders"] = [s for s in doc["folders"] if s != slug]
+        _save_registry(reg)
 
 
 # ---------- Приём загруженного файла (используется веб-ручкой upload) ----------
@@ -521,21 +526,22 @@ def save_uploaded_file(filename: str, content: bytes) -> Path:
     if len(content) > MAX_UPLOAD_BYTES:
         raise ValueError(f"Файл превышает лимит {MAX_UPLOAD_BYTES // (1024*1024)} МБ")
 
-    # Загруженный файл сначала попадает в корень data/documents — тему определит
-    # index_document() (автосортировка) и физически переложит в подпапку темы.
+    # Файл хранится в одном экземпляре, плоско в data/documents/. Папки — логические
+    # метки, физических копий не создают (ТЗ §2). Классификацию по папкам сделает
+    # index_document() при обработке.
     filepath = DOCS_DIR / filename
     with open(filepath, "wb") as f:
         f.write(content)
 
-    # ИСПРАВЛЕНО: убран дублирующий именованный аргумент 'filename'
     _update_registry(
         filename,
         size_bytes=len(content),
         uploaded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         status="uploaded",
         chunks=0,
-        topic=None,
-        topic_name=None,
+        folders=[],
+        stage_ids=[],
+        summary=None,
         error=None,
     )
     return filepath
@@ -631,6 +637,12 @@ def index_all_documents(docs_dir: Optional[Path] = None, recreate: bool = False)
         print(f"В папке {docs_dir} не найдено поддерживаемых файлов ({', '.join(sorted(SUPPORTED_EXT))}).")
         return
 
+    # Векторы папок должны существовать до классификации чанков.
+    try:
+        classify.sync_folder_vectors()
+    except Exception as e:
+        print(f"Предупреждение: не удалось построить векторы папок: {e}")
+
     for filepath in files:
         if filepath.name not in _load_registry():
             _update_registry(
@@ -640,18 +652,84 @@ def index_all_documents(docs_dir: Optional[Path] = None, recreate: bool = False)
                 uploaded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                 status="uploaded",
                 chunks=0,
-                topic=None,
-                topic_name=None,
+                folders=[],
+                stage_ids=[],
                 error=None,
             )
         print(f"\n=== Обработка файла: {filepath.name} ===")
         result = index_document(filepath)
         if result["status"] == "indexed":
-            print(f"  Загружено {result['chunks']} чанков за {result['elapsed']:.2f} сек -> тема «{result['topic_name']}»")
+            print(f"  Загружено {result['chunks']} чанков за {result['elapsed']:.2f} сек -> папки: {result['folders'] or '(общая база)'}")
         else:
             print(f"  ОШИБКА: {result.get('error')}")
 
     print("\nИндексация завершена.")
-    print("\nТемы в базе:")
-    for t in topics.list_topics():
-        print(f"  - {t['name']} ({t['slug']}): {t.get('doc_count', 0)} документ(ов)")   
+
+
+# ---------- Повторный анализ (ТЗ §8, §26) ----------
+def reanalyze_document(filename: str) -> dict:
+    """Заново классифицирует уже проиндексированный документ БЕЗ повторного docling/
+    эмбеддинга: перечитывает чанки из Qdrant, гоняет их через classify.* и обновляет
+    метки папок/этапов. Дёшево — векторы уже есть."""
+    with _registry_lock:
+        entry = _load_registry().get(filename)
+    summary = (entry or {}).get("summary") or ""
+    doc_cls = classify.classify_document(summary) if summary else {"folders": [], "stage_ids": []}
+    doc_folders = doc_cls["folders"]
+
+    offset = None
+    touched = 0
+    while True:
+        batch, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=filename))]),
+            limit=256, with_payload=True, with_vectors=True, offset=offset,
+        )
+        for p in batch:
+            base_text = (p.payload or {}).get("raw_text") or (p.payload or {}).get("text") or ""
+            cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
+            client.set_payload(collection_name=COLLECTION_NAME,
+                               payload={"folders": cc["folders"], "stage_ids": cc["stage_ids"]},
+                               points=[p.id])
+            touched += 1
+        if offset is None:
+            break
+    _update_registry(filename, folders=doc_folders, stage_ids=doc_cls["stage_ids"])
+    return {"filename": filename, "folders": doc_folders, "chunks": touched}
+
+
+def reanalyze_all() -> dict:
+    """Полный повторный анализ всей базы (ТЗ §8 — «запустить повторный анализ всей базы»)."""
+    classify.sync_folder_vectors()
+    results = []
+    for doc in list_documents():
+        if doc.get("status") == "indexed":
+            results.append(reanalyze_document(doc["filename"]))
+    return {"reanalyzed": len(results), "documents": results}
+
+
+def reanalyze_for_folder(slug: str) -> dict:
+    """Точечный реанализ под изменившуюся/новую папку (ТЗ §8): по вектору папки
+    находим потенциально релевантные документы и переанализируем только их, а не всю базу."""
+    classify.sync_folder_vectors()
+    folder = folders.get_by_slug(slug)
+    if not folder:
+        return {"reanalyzed": 0, "documents": []}
+    # Кандидаты — документы, чьи чанки близки к вектору папки (+ уже помеченные ею).
+    candidates = set()
+    try:
+        vec = get_embedding(classify.folder_tag_text(folder))
+        hits = client.query_points(collection_name=COLLECTION_NAME, query=vec,
+                                   limit=200, with_payload=True).points
+        for h in hits:
+            src = (h.payload or {}).get("source")
+            if src:
+                candidates.add(src)
+    except Exception as e:
+        _log("REANALYZE", f"векторный отбор кандидатов не удался ({e}) — беру все документы")
+        candidates = {d["filename"] for d in list_documents() if d.get("status") == "indexed"}
+    for doc in list_documents():
+        if slug in (doc.get("folders") or []):
+            candidates.add(doc["filename"])
+    results = [reanalyze_document(name) for name in sorted(candidates)]
+    return {"reanalyzed": len(results), "documents": results}

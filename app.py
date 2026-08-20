@@ -20,8 +20,24 @@ import planner
 import auth
 import users
 import questions
+import folders
+import stages
+import classify
 import employees as adaptation
 from indexing import DOCS_DIR
+
+
+def _bg(fn, *args):
+    """Фоновая задача (реанализ базы и т.п. — может быть долгой из-за LLM)."""
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def _current_stage_ids(user: dict) -> list:
+    """Текущий этап обучения пользователя (ТЗ §6) — приоритет поиска, не фильтр.
+    ponytail: пока прогресс обучения по этапам-блокам отдельно не трекается, отдаём
+    пусто (поиск работает без буста). Точка интеграции, когда появится прогресс:
+    вернуть id этапов из stages, на которых сейчас пользователь."""
+    return []
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -31,8 +47,22 @@ STATIC_DIR = BASE_DIR / "static"
 async def lifespan(app: FastAPI):
     # Схема БД (PostgreSQL) — до первого обращения к аккаунтам
     db.init_schema()
+    # Стартовая структура знаний (этапы + смысловые папки) из data/knowledge_seed.json —
+    # только если таблицы пусты. Получена из исходного Excel; дальше ей управляет человек.
+    seed_path = BASE_DIR / "data" / "knowledge_seed.json"
+    if seed_path.exists():
+        seed = json.loads(seed_path.read_text(encoding="utf-8"))
+        s = stages.seed_if_empty(seed.get("stages", []))
+        f = folders.seed_if_empty(seed.get("folders", []))
+        if s or f:
+            print(f"Стартовая структура знаний: этапов {s}, папок {f}")
     # Векторная коллекция — до первого /ask или загрузки файла
     indexing.create_collection(recreate=False)
+    # Векторы папок для классификации документов (перестраиваются при изменениях).
+    try:
+        classify.sync_folder_vectors()
+    except Exception as e:
+        print(f"Предупреждение: векторы папок не построены (Qdrant/Ollama?): {e}")
 
     # Разовые миграции со старых файловых хранилищ в БД
     moved_json = users.migrate_legacy_json_users()
@@ -353,7 +383,7 @@ async def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
     history = get_recent_history(session_id)
 
     try:
-        result = handle_question(question, history=history)
+        result = handle_question(question, history=history, current_stage_ids=_current_stage_ids(user))
         result = _route_to_human(result, user)
         result["elapsed_time"] = time.time() - start
         result["session_id"] = session_id
@@ -439,13 +469,131 @@ async def remove_document(filename: str):
     return {"filename": filename, "deleted": True}
 
 
+# ---------- Смысловые папки (логические категории; ими управляет человек) ----------
+class FolderRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    criteria: list | None = None
+    stage_ids: list | None = None
+    enabled: bool | None = None
+
+
 @app.get("/folders", dependencies=admin_only)
 async def get_folders():
-    """
-    Смысловые папки базы знаний с числом документов. Папки создаёт LLM при
-    загрузке документа — вручную их никто не заводит.
-    """
-    return {"folders": indexing.folder_stats()}
+    """Смысловые папки базы знаний. Их создаёт и редактирует человек — ИИ только
+    классифицирует документы внутрь существующих папок, но не заводит новые."""
+    counts = indexing.folder_doc_counts()
+    result = folders.list_folders()
+    for f in result:
+        f["documents"] = counts.get(f["slug"], 0)
+    return {"folders": result}
+
+
+@app.post("/folders", dependencies=admin_only)
+async def create_folder(req: FolderRequest):
+    try:
+        folder = folders.create_folder(req.name, req.description or "", req.criteria, req.stage_ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Новая папка -> обновляем векторы и переанализируем потенциально релевантные
+    # документы, чтобы они попали в неё (ТЗ §8).
+    classify.sync_folder_vectors()
+    _bg(indexing.reanalyze_for_folder, folder["slug"])
+    return folder
+
+
+@app.put("/folders/{folder_id}", dependencies=admin_only)
+async def update_folder(folder_id: str, req: FolderRequest):
+    existing = folders.get_folder(folder_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Папка не найдена")
+    try:
+        folder = folders.update_folder(folder_id, **req.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    classify.sync_folder_vectors()
+    # Изменились критерии/название/этапы или папку включили — переанализируем документы.
+    fields = req.model_dump(exclude_none=True)
+    if any(k in fields for k in ("name", "description", "criteria", "stage_ids", "enabled")):
+        _bg(indexing.reanalyze_for_folder, folder["slug"])
+    return folder
+
+
+@app.delete("/folders/{folder_id}", dependencies=admin_only)
+async def delete_folder(folder_id: str):
+    """Удаляет только логическую категорию — документы остаются в общей базе знаний."""
+    folder = folders.get_folder(folder_id)
+    if folder is None:
+        raise HTTPException(status_code=404, detail="Папка не найдена")
+    folders.delete_folder(folder_id)
+    indexing.strip_folder_from_chunks(folder["slug"])   # снимаем метку с чанков, документы не трогаем
+    classify.sync_folder_vectors()
+    return {"deleted": True}
+
+
+# ---------- Повторный анализ и уточнения по документам (ТЗ §8, §16, §26) ----------
+class ClarifyRequest(BaseModel):
+    clarification: str
+
+
+@app.post("/documents/reanalyze", dependencies=admin_only)
+async def reanalyze_documents():
+    """Полный повторный анализ всей базы под текущую структуру папок (фоново)."""
+    classify.sync_folder_vectors()
+    _bg(indexing.reanalyze_all)
+    return {"started": True}
+
+
+@app.post("/documents/{filename}/reanalyze", dependencies=admin_only)
+async def reanalyze_one(filename: str):
+    return indexing.reanalyze_document(filename)
+
+
+@app.post("/documents/{filename}/clarify", dependencies=admin_only)
+async def clarify_document(filename: str, req: ClarifyRequest):
+    """Текстовое уточнение пользователя (актуальность/архив/область действия — ТЗ §17).
+    Исходный документ не переписывается — уточнение хранится как доп. контекст."""
+    if not indexing.set_clarification(filename, req.clarification):
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    return {"filename": filename, "clarification": req.clarification}
+
+
+# ---------- Этапы обучения (структура, к которой привязываются папки) ----------
+class StageRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    substages: list | None = None
+    position: int | None = None
+
+
+@app.get("/knowledge/stages", dependencies=admin_only)
+async def get_stages():
+    return {"stages": stages.list_stages()}
+
+
+@app.post("/knowledge/stages", dependencies=admin_only)
+async def create_stage(req: StageRequest):
+    try:
+        return stages.create_stage(req.title, req.description or "", req.substages)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/knowledge/stages/{stage_id}", dependencies=admin_only)
+async def update_stage(stage_id: str, req: StageRequest):
+    if stages.get_stage(stage_id) is None:
+        raise HTTPException(status_code=404, detail="Этап не найден")
+    try:
+        return stages.update_stage(stage_id, **req.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/knowledge/stages/{stage_id}", dependencies=admin_only)
+async def delete_stage(stage_id: str):
+    if not stages.delete_stage(stage_id):
+        raise HTTPException(status_code=404, detail="Этап не найден")
+    return {"deleted": True}
 
 
 # ---------- Вопросы без ответа (эскалация человеку) ----------

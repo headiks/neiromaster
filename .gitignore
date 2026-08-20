@@ -23,6 +23,7 @@ __pycache__/
 # Оставляем только конфиг-семя каталога этапов.
 /data/*
 !/data/stage_catalog.json
+!/data/knowledge_seed.json
 
 # Явный список секретов/ПДн — на случай изменения структуры data/
 data/users.json
