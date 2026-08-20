@@ -50,12 +50,18 @@ async def lifespan(app: FastAPI):
     # Стартовая структура знаний (этапы + смысловые папки) из data/knowledge_seed.json —
     # только если таблицы пусты. Получена из исходного Excel; дальше ей управляет человек.
     seed_path = BASE_DIR / "data" / "knowledge_seed.json"
-    if seed_path.exists():
-        seed = json.loads(seed_path.read_text(encoding="utf-8"))
-        s = stages.seed_if_empty(seed.get("stages", []))
-        f = folders.seed_if_empty(seed.get("folders", []))
-        if s or f:
-            print(f"Стартовая структура знаний: этапов {s}, папок {f}")
+    if not seed_path.exists():
+        print(f"ВНИМАНИЕ: нет файла сида {seed_path} — стартовые папки не заведены.")
+    else:
+        try:
+            seed = json.loads(seed_path.read_text(encoding="utf-8"))
+            s = stages.seed_if_empty(seed.get("stages", []))
+            f = folders.seed_if_empty(seed.get("folders", []))
+            print(f"Стартовая структура знаний: засеяно этапов {s}, папок {f} "
+                  f"(в БД сейчас: папок {len(folders.list_folders())}).")
+        except Exception as e:
+            # Не роняем старт из-за сида — логируем, папки можно засеять `python seed_knowledge.py`.
+            print(f"ОШИБКА посева стартовой структуры: {e}")
     # Векторная коллекция — до первого /ask или загрузки файла
     indexing.create_collection(recreate=False)
     # Векторы папок для классификации документов (перестраиваются при изменениях).
@@ -482,8 +488,11 @@ class FolderRequest(BaseModel):
 async def get_folders():
     """Смысловые папки базы знаний. Их создаёт и редактирует человек — ИИ только
     классифицирует документы внутрь существующих папок, но не заводит новые."""
-    counts = indexing.folder_doc_counts()
     result = folders.list_folders()
+    try:
+        counts = indexing.folder_doc_counts()
+    except Exception:
+        counts = {}   # счётчик документов не должен ронять список папок
     for f in result:
         f["documents"] = counts.get(f["slug"], 0)
     return {"folders": result}
