@@ -331,9 +331,12 @@ dialog::backdrop { background: color-mix(in srgb, var(--color-neutral-900) 50%, 
     .chat-header { align-items: flex-start !important; gap: 12px; }
     .input-area { flex-direction: column; }
     #ask-btn { width: 100%; }
-    .tabs { overflow-x: auto; max-width: 100%; }
+    .tabs { overflow-x: auto; overflow-y: hidden; max-width: 100%; }
     .tab { white-space: nowrap; }
-    .plan-meta, .employee-form, .sub-grid { grid-template-columns: 1fr !important; }
+    .plan-meta, .employee-form, .sub-grid, .chunk-detail-grid { grid-template-columns: 1fr !important; }
     .doc-item { align-items: flex-start !important; flex-direction: column; }
     table.schedule { display: block; overflow-x: auto; }
+    dialog { padding: 16px !important; }
+    .stage-head { flex-direction: column; align-items: stretch !important; }
+    .toolbar, .add-row, .export-links { width: 100%; }
 }
