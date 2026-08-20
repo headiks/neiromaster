@@ -314,14 +314,14 @@
     <div class="tab-pane" id="pane-questions">
         <h2 class="section-title"><i data-lucide="help-circle"></i> Вопросы, на которые ассистент не ответил</h2>
         <div class="stage-hint">
-            Сюда попадают вопросы сотрудников с пометкой ЧС (⚠️) и те, на которые в
+            Сюда попадают вопросы сотрудников с пометкой ЧС и те, на которые в
             регламентах не нашлось ответа. Ответьте — сотрудник увидит ответ в личном кабинете.
         </div>
         <div class="toolbar" style="margin-top:12px;">
             <label style="font-size:14px;color:#475569;">
                 <input type="checkbox" id="questions-show-all" onchange="loadQuestions()"> Показать отвеченные
             </label>
-            <button class="ghost-btn" onclick="loadQuestions()">🔄 Обновить</button>
+            <button class="ghost-btn" onclick="loadQuestions()"><i data-lucide="refresh-cw"></i> Обновить</button>
         </div>
         <div id="questions-list"><div class="empty-hint">Загрузка вопросов...</div></div>
     </div>
@@ -337,7 +337,7 @@
             </div>
             <button class="ghost-btn" onclick="newPlan()">＋ Новый план</button>
             <button class="ghost-btn" onclick="duplicatePlan()">⧉ Дублировать</button>
-            <button class="ghost-btn" onclick="deletePlan()">🗑 Удалить план</button>
+            <button class="ghost-btn" onclick="deletePlan()"><i data-lucide="trash-2"></i> Удалить план</button>
         </div>
 
         <div class="card">
@@ -370,8 +370,8 @@
         </div>
 
         <div class="toolbar" style="margin-top:24px;">
-            <button class="primary-btn" onclick="savePlan()">💾 Сохранить план</button>
-            <button class="primary-btn" id="generate-btn" onclick="generatePlan()">⚙️ Сгенерировать ответы</button>
+            <button class="primary-btn" onclick="savePlan()"><i data-lucide="save"></i> Сохранить план</button>
+            <button class="primary-btn" id="generate-btn" onclick="generatePlan()"><i data-lucide="sparkles"></i> Сгенерировать ответы</button>
             <span id="plan-status" style="color:#475569;font-size:14px;"></span>
         </div>
 
@@ -445,7 +445,7 @@
                 <textarea id="emp-notes" placeholder="Любые пометки по сотруднику"></textarea>
             </div>
             <div class="toolbar">
-                <button class="primary-btn" onclick="saveEmployee()">💾 Сохранить</button>
+                <button class="primary-btn" onclick="saveEmployee()"><i data-lucide="save"></i> Сохранить</button>
                 <button class="ghost-btn" onclick="resetEmployeeForm()">Очистить форму</button>
                 <span id="employee-status" style="color:#475569;font-size:14px;"></span>
             </div>
@@ -537,7 +537,7 @@
             currentUser = me;
             isOwner = me.role === 'owner';
             const roleTitle = isOwner ? 'главный администратор' : 'администратор';
-            document.getElementById('whoami').textContent = `👤 ${me.full_name || me.username} · ${roleTitle}`;
+            document.getElementById('whoami').innerHTML = `<i data-lucide="user"></i> ${escapeHtml(me.full_name || me.username)} · ${roleTitle}`;
             if (employeesCache.length) renderEmployees(employeesCache);
         }).catch(() => {});
 
@@ -612,22 +612,22 @@
         function uploadFile(file) {
             const formData = new FormData();
             formData.append('file', file);
-            uploadStatus[file.name] = '⏳ загрузка...';
+            uploadStatus[file.name] = 'загрузка...';
             renderUploadStatus();
 
             apiJson('/documents/upload', { method: 'POST', body: formData })
                 .then(({ ok, data }) => {
                     if (!ok) {
-                        uploadStatus[file.name] = `❌ ${escapeHtml(data.detail || 'ошибка загрузки')}`;
+                        uploadStatus[file.name] = `${escapeHtml(data.detail || 'ошибка загрузки')}`;
                         renderUploadStatus();
                         return;
                     }
-                    uploadStatus[file.name] = '🕓 в очереди на обработку...';
+                    uploadStatus[file.name] = 'в очереди на обработку...';
                     renderUploadStatus();
                     pollJob(file.name, data.job_id);
                 })
                 .catch(err => {
-                    uploadStatus[file.name] = `❌ ${escapeHtml(err.message)}`;
+                    uploadStatus[file.name] = `${escapeHtml(err.message)}`;
                     renderUploadStatus();
                 });
         }
@@ -635,16 +635,16 @@
         function pollJob(name, jobId) {
             api(`/documents/jobs/${encodeURIComponent(jobId)}`).then(r => r.json()).then(job => {
                 if (job.status === 'queued') {
-                    uploadStatus[name] = '🕓 в очереди...';
+                    uploadStatus[name] = 'в очереди...';
                 } else if (job.status === 'processing') {
-                    uploadStatus[name] = '⚙️ разбор docling → чанкинг → эмбеддинги...';
+                    uploadStatus[name] = 'разбор docling → чанкинг → эмбеддинги...';
                 } else if (job.status === 'indexed') {
                     const r = job.result || {};
-                    uploadStatus[name] = `✅ папка «${escapeHtml(r.topic_name || '?')}», ${r.chunks} чанков за ${(r.elapsed || 0).toFixed(1)} сек`;
+                    uploadStatus[name] = `папка «${escapeHtml(r.topic_name || '?')}», ${r.chunks} чанков за ${(r.elapsed || 0).toFixed(1)} сек`;
                     renderUploadStatus(); loadDocuments(); loadFolders();
                     return;
                 } else if (job.status === 'error') {
-                    uploadStatus[name] = `❌ ${escapeHtml((job.result && job.result.error) || 'ошибка обработки')}`;
+                    uploadStatus[name] = `${escapeHtml((job.result && job.result.error) || 'ошибка обработки')}`;
                     renderUploadStatus(); loadDocuments();
                     return;
                 }
@@ -686,7 +686,7 @@
             }
             folderGrid.innerHTML = shown.map(f => `
                 <div class="folder-card">
-                    <div class="name">🗂️ ${escapeHtml(f.name)}</div>
+                    <div class="name"><i data-lucide="folder"></i> ${escapeHtml(f.name)}</div>
                     <div class="desc">${escapeHtml(f.description || '')}</div>
                     <div class="count">${f.documents || 0} док. · ${f.chunks || 0} чанков</div>
                 </div>
@@ -705,13 +705,13 @@
                     doc.uploaded_at ? doc.uploaded_at.replace('T', ' ') : null,
                 ].filter(Boolean).join(' · ');
                 const folderLine = doc.folder
-                    ? `<div><span class="folder-tag">🗂️ ${escapeHtml(doc.folder)}</span></div>` : '';
+                    ? `<div><span class="folder-tag"><i data-lucide="folder"></i> ${escapeHtml(doc.folder)}</span></div>` : '';
                 const errorLine = doc.status === 'error' && doc.error
                     ? `<div class="doc-meta" style="color:#dc2626;">${escapeHtml(doc.error)}</div>` : '';
                 return `
                     <div class="doc-item">
                         <div class="doc-info">
-                            <div class="doc-name" title="${escapeHtml(doc.filename)}">📄 ${escapeHtml(doc.filename)}</div>
+                            <div class="doc-name" title="${escapeHtml(doc.filename)}"><i data-lucide="file-text"></i> ${escapeHtml(doc.filename)}</div>
                             ${folderLine}
                             <div class="doc-meta">${meta}</div>
                             ${errorLine}
@@ -729,12 +729,12 @@
         function showDocDetail(filename) {
             const dialog = document.getElementById('doc-detail-dialog');
             const body = document.getElementById('doc-detail-body');
-            document.getElementById('doc-detail-title').textContent = `📄 ${filename}`;
+            document.getElementById('doc-detail-title').textContent = `${filename}`;
             body.innerHTML = `<div class="empty-hint">Загружаем чанки и векторы…</div>`;
             dialog.showModal();
             apiJson(`/documents/${encodeURIComponent(filename)}/chunks`)
                 .then(({ ok, data }) => {
-                    if (!ok) { body.innerHTML = `<div class="warn">⚠️ ${escapeHtml(data.detail || 'Не удалось получить данные')}</div>`; return; }
+                    if (!ok) { body.innerHTML = `<div class="warn"><i data-lucide="triangle-alert"></i> ${escapeHtml(data.detail || 'Не удалось получить данные')}</div>`; return; }
                     body.innerHTML = renderDocDetail(data);
                 })
                 .catch(err => { body.innerHTML = `<div class="error">Ошибка: ${escapeHtml(err.message)}</div>`; });
@@ -766,7 +766,7 @@
                         <small style="color:#94a3b8;">id: ${escapeHtml(c.id)}</small>
                     </div>
                     <div class="doc-meta" style="margin:4px 0;">${meta}</div>
-                    ${headings ? `<div class="doc-meta" style="color:#475569;">🧭 ${escapeHtml(headings)}</div>` : ''}
+                    ${headings ? `<div class="doc-meta" style="color:#475569;"><i data-lucide="milestone"></i> ${escapeHtml(headings)}</div>` : ''}
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px;">
                         <div>
                             <div class="doc-meta" style="margin-bottom:4px;">Текст (ушёл в эмбеддинг):</div>
@@ -1069,9 +1069,9 @@
                                 <span style="color:#94a3b8;">${subIndex + 1}.</span>
                                 <input type="text" value="${escapeHtml(sub.title)}"
                                        oninput="subField(${stageIndex}, ${subIndex}, 'title', this.value)">
-                                <button class="icon-btn" onclick="moveSubstage(${stageIndex}, ${subIndex}, -1)">↑</button>
-                                <button class="icon-btn" onclick="moveSubstage(${stageIndex}, ${subIndex}, 1)">↓</button>
-                                <button class="icon-btn danger" onclick="removeSubstage(${stageIndex}, ${subIndex})">✕</button>
+                                <button class="icon-btn" onclick="moveSubstage(${stageIndex}, ${subIndex}, -1)"><i data-lucide="chevron-up"></i></button>
+                                <button class="icon-btn" onclick="moveSubstage(${stageIndex}, ${subIndex}, 1)"><i data-lucide="chevron-down"></i></button>
+                                <button class="icon-btn danger" onclick="removeSubstage(${stageIndex}, ${subIndex})"><i data-lucide="x"></i></button>
                             </div>
                             <div style="margin-top:10px;">
                                 <label style="font-size:12px;color:#64748b;">Что должен написать бот (основа для генерации по документам)</label>
@@ -1095,7 +1095,7 @@
                                     <input type="time" value="${escapeHtml(sub.schedule.time)}"
                                            onchange="subSchedule(${stageIndex}, ${subIndex}, 'time', this.value)">
                                 </div>
-                                <div class="sub-when">📅 ${escapeHtml(sendDateLabel(offsetDays, sub.schedule.time))}</div>
+                                <div class="sub-when"><i data-lucide="calendar-days"></i> ${escapeHtml(sendDateLabel(offsetDays, sub.schedule.time))}</div>
                             </div>
                         </div>
                     `;
@@ -1112,8 +1112,8 @@
                                        oninput="plan.stages[${stageIndex}].title = this.value">
                             </div>
                             <div>
-                                <button class="icon-btn" onclick="moveStage(${stageIndex}, -1)">↑</button>
-                                <button class="icon-btn" onclick="moveStage(${stageIndex}, 1)">↓</button>
+                                <button class="icon-btn" onclick="moveStage(${stageIndex}, -1)"><i data-lucide="chevron-up"></i></button>
+                                <button class="icon-btn" onclick="moveStage(${stageIndex}, 1)"><i data-lucide="chevron-down"></i></button>
                                 <button class="icon-btn danger" onclick="removeStage(${stageIndex})">Удалить этап</button>
                             </div>
                         </div>
@@ -1181,7 +1181,7 @@
         function savePlan() {
             const isUpdate = Boolean(plan.plan_id);
             const url = isUpdate ? `/plans/${encodeURIComponent(plan.plan_id)}` : '/plans';
-            setStatus('💾 Сохранение...');
+            setStatus('Сохранение...');
             return api(url, {
                 method: isUpdate ? 'PUT' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1199,17 +1199,17 @@
                     });
                     fillPlanMeta();
                     renderStages();
-                    setStatus(`✅ Сохранено: ${saved.title}`);
+                    setStatus(`Сохранено: ${saved.title}`);
                     return refreshPlanList().then(() => {
                         document.getElementById('plan-select').value = saved.plan_id;
                     });
                 })
-                .catch(err => setStatus(`❌ Ошибка сохранения: ${err.message}`));
+                .catch(err => setStatus(`Ошибка сохранения: ${err.message}`));
         }
 
         function generatePlan() {
             if (!plan.stages.some(s => s.substages.length)) {
-                setStatus('❌ Добавьте хотя бы один подэтап.');
+                setStatus('Добавьте хотя бы один подэтап.');
                 return;
             }
             document.getElementById('generate-btn').disabled = true;
@@ -1217,14 +1217,14 @@
                 apiJson(`/plans/${encodeURIComponent(plan.plan_id)}/generate`, { method: 'POST' })
             ).then(({ ok, data }) => {
                 if (!ok) {
-                    setStatus(`❌ ${data.detail || 'Не удалось запустить генерацию'}`);
+                    setStatus(`${data.detail || 'Не удалось запустить генерацию'}`);
                     document.getElementById('generate-btn').disabled = false;
                     return;
                 }
-                setStatus('⚙️ Генерация запущена');
+                setStatus('Генерация запущена');
                 pollJob(data.job_id);
             }).catch(err => {
-                setStatus(`❌ ${err.message}`);
+                setStatus(`${err.message}`);
                 document.getElementById('generate-btn').disabled = false;
             });
         }
@@ -1247,7 +1247,7 @@
                     if (job.status === 'done' || job.status === 'error') {
                         clearInterval(pollTimer);
                         document.getElementById('generate-btn').disabled = false;
-                        setStatus(job.status === 'done' ? '✅ Генерация завершена' : `❌ ${job.error}`);
+                        setStatus(job.status === 'done' ? 'Генерация завершена' : `${job.error}`);
                         loadScheduleIfAny();
                         refreshPlanList();
                     }
@@ -1278,13 +1278,13 @@
                     <td style="white-space:nowrap;">${escapeHtml(whenLabel(msg))}</td>
                     <td>
                         <div class="msg-text">${escapeHtml(msg.content.text || '—')}</div>
-                        ${msg.error ? `<div class="msg-error">⚠️ ${escapeHtml(msg.error)}</div>` : ''}
+                        ${msg.error ? `<div class="msg-error"><i data-lucide="triangle-alert"></i> ${escapeHtml(msg.error)}</div>` : ''}
                         <div class="msg-meta">
-                            ${msg.folders_used && msg.folders_used.length ? '🗂️ ' + escapeHtml(msg.folders_used.join(', ')) + ' · ' : ''}
-                            ${msg.sources && msg.sources.length ? '📄 ' + escapeHtml([...new Set(msg.sources.map(s => s.source))].join(', ')) : ''}
+                            ${msg.folders_used && msg.folders_used.length ? '' + escapeHtml(msg.folders_used.join(', ')) + ' · ' : ''}
+                            ${msg.sources && msg.sources.length ? '' + escapeHtml([...new Set(msg.sources.map(s => s.source))].join(', ')) : ''}
                         </div>
                         ${withRegenerate ? `<button class="icon-btn" style="margin-top:8px;"
-                                onclick="regenerate('${escapeHtml(msg.message_id)}')">↻ Перегенерировать</button>` : ''}
+                                onclick="regenerate('${escapeHtml(msg.message_id)}')"><i data-lucide="refresh-cw"></i> Перегенерировать</button>` : ''}
                     </td>
                 </tr>
             `).join('');
@@ -1293,12 +1293,12 @@
         function renderSchedule(schedule) {
             const base = `/plans/${encodeURIComponent(schedule.plan_id)}/export`;
             document.getElementById('schedule-result').innerHTML = `
-                <h2 class="section-title">📤 Сгенерированное расписание шаблона</h2>
+                <h2 class="section-title"><i data-lucide="upload"></i> Сгенерированное расписание шаблона</h2>
                 <div class="export-links">
-                    <a href="${base}/schedule.md" download>⬇️ schedule.md — расписание с ответами</a>
-                    <a href="${base}/schedule.json" download>⬇️ schedule.json — для мессенджеров и приложения</a>
-                    <a href="${base}/plan.md" download>⬇️ plan.md — план в формате для LLM</a>
-                    <a href="${base}/plan.json" download>⬇️ plan.json — канонический план</a>
+                    <a href="${base}/schedule.md" download><i data-lucide="download"></i> schedule.md — расписание с ответами</a>
+                    <a href="${base}/schedule.json" download><i data-lucide="download"></i> schedule.json — для мессенджеров и приложения</a>
+                    <a href="${base}/plan.md" download><i data-lucide="download"></i> plan.md — план в формате для LLM</a>
+                    <a href="${base}/plan.json" download><i data-lucide="download"></i> plan.json — канонический план</a>
                 </div>
                 <table class="schedule">
                     <thead><tr><th>Этап</th><th>Подэтап</th><th>Дата и время</th><th>Ответ</th></tr></thead>
@@ -1308,12 +1308,12 @@
         }
 
         function regenerate(messageId) {
-            setStatus(`⚙️ Перегенерация: ${messageId}`);
+            setStatus(`Перегенерация: ${messageId}`);
             api(`/plans/${encodeURIComponent(plan.plan_id)}/messages/${encodeURIComponent(messageId)}/regenerate`,
                 { method: 'POST' })
                 .then(res => res.json())
-                .then(() => { setStatus('✅ Подэтап обновлён'); loadScheduleIfAny(); })
-                .catch(err => setStatus(`❌ ${err.message}`));
+                .then(() => { setStatus('Подэтап обновлён'); loadScheduleIfAny(); })
+                .catch(err => setStatus(`${err.message}`));
         }
 
         // ---------------- Пользователи ----------------
@@ -1343,7 +1343,7 @@
             const select = document.getElementById('emp-plan_id');
             const current = select.value;
             select.innerHTML = `<option value="">— план не назначен —</option>` + plans.map(p =>
-                `<option value="${escapeHtml(p.plan_id)}">${escapeHtml(p.title)}${p.generated ? ' ✅' : ' (без ответов)'}</option>`
+                `<option value="${escapeHtml(p.plan_id)}">${escapeHtml(p.title)}${p.generated ? ' <i data-lucide="check"></i>' : ' (без ответов)'}</option>`
             ).join('');
             select.value = current;
         }
@@ -1363,29 +1363,29 @@
         function userActions(user) {
             const id = user.id;
             const isSelf = currentUser && currentUser.id === id;
-            const buttons = [`<button class="icon-btn" onclick="showEmployeeSchedule('${id}')">📅 Расписание</button>`];
+            const buttons = [`<button class="icon-btn" onclick="showEmployeeSchedule('${id}')"><i data-lucide="calendar-days"></i> Расписание</button>`];
 
             // Обычный администратор правит только сотрудников — админов и главного трогать нельзя
             const manageable = isOwner || user.role === 'employee';
             if (manageable) {
-                buttons.push(`<button class="icon-btn" onclick="editEmployee('${id}')">✎ Изменить</button>`);
-                buttons.push(`<button class="icon-btn" onclick="openCredentialsDialog('${id}')">🔑 Доступ</button>`);
+                buttons.push(`<button class="icon-btn" onclick="editEmployee('${id}')"><i data-lucide="pencil"></i> Изменить</button>`);
+                buttons.push(`<button class="icon-btn" onclick="openCredentialsDialog('${id}')"><i data-lucide="key-round"></i> Доступ</button>`);
                 if (!isSelf) {
                     buttons.push(user.active
-                        ? `<button class="icon-btn" onclick="setUserActive('${id}', false)">⏸ Заблокировать</button>`
-                        : `<button class="icon-btn" onclick="setUserActive('${id}', true)">✅ Подтвердить</button>`);
+                        ? `<button class="icon-btn" onclick="setUserActive('${id}', false)"><i data-lucide="ban"></i> Заблокировать</button>`
+                        : `<button class="icon-btn" onclick="setUserActive('${id}', true)"><i data-lucide="check"></i> Подтвердить</button>`);
                 }
             }
 
             // Раздача прав и удаление — только у главного администратора
             if (isOwner && !isSelf && user.role !== 'owner') {
                 buttons.push(user.role === 'admin'
-                    ? `<button class="icon-btn" onclick="setUserRole('${id}', 'employee')">⬇ Убрать из администраторов</button>`
-                    : `<button class="icon-btn" onclick="setUserRole('${id}', 'admin')">⬆ Назначить администратором</button>`);
+                    ? `<button class="icon-btn" onclick="setUserRole('${id}', 'employee')"><i data-lucide="arrow-down"></i> Убрать из администраторов</button>`
+                    : `<button class="icon-btn" onclick="setUserRole('${id}', 'admin')"><i data-lucide="arrow-up"></i> Назначить администратором</button>`);
                 if (user.role === 'admin') {
-                    buttons.push(`<button class="icon-btn" onclick="transferOwnership('${id}')">👑 Сделать главным</button>`);
+                    buttons.push(`<button class="icon-btn" onclick="transferOwnership('${id}')"><i data-lucide="crown"></i> Сделать главным</button>`);
                 }
-                buttons.push(`<button class="icon-btn danger" onclick="deleteEmployee('${id}')">✕ Удалить</button>`);
+                buttons.push(`<button class="icon-btn danger" onclick="deleteEmployee('${id}')"><i data-lucide="x"></i> Удалить</button>`);
             }
             return buttons.join(' ');
         }
@@ -1394,7 +1394,7 @@
             const container = document.getElementById('employee-list');
             const pending = list.filter(u => !u.active);
             document.getElementById('pending-block').innerHTML = pending.length
-                ? `<div class="warn">⏳ Ждут подтверждения: ${pending.map(u => escapeHtml(u.full_name)).join(', ')}.
+                ? `<div class="warn"><i data-lucide="clock"></i> Ждут подтверждения: ${pending.map(u => escapeHtml(u.full_name)).join(', ')}.
                    Пока учётная запись не подтверждена, войти в систему нельзя.</div>`
                 : '';
 
@@ -1479,7 +1479,7 @@
             const isUpdate = Boolean(editingEmployeeId);
             const payload = employeePayload(!isUpdate);
             if (!payload.full_name) {
-                document.getElementById('employee-status').textContent = '❌ Укажите ФИО';
+                document.getElementById('employee-status').textContent = 'Укажите ФИО';
                 return;
             }
             const url = isUpdate ? `/users/${encodeURIComponent(editingEmployeeId)}` : '/users';
@@ -1489,10 +1489,10 @@
                 body: JSON.stringify(payload),
             }).then(({ ok, data }) => {
                 if (!ok) {
-                    document.getElementById('employee-status').textContent = `❌ ${data.detail || 'Не удалось сохранить'}`;
+                    document.getElementById('employee-status').textContent = `${data.detail || 'Не удалось сохранить'}`;
                     return;
                 }
-                document.getElementById('employee-status').textContent = `✅ Сохранён: ${data.full_name}`;
+                document.getElementById('employee-status').textContent = `Сохранён: ${data.full_name}`;
                 resetEmployeeForm();
                 loadEmployees();
             });
@@ -1589,23 +1589,23 @@
             container.innerHTML = `<div class="empty-hint">Считаем расписание...</div>`;
             apiJson(`/users/${encodeURIComponent(id)}/schedule`).then(({ ok, data }) => {
                 if (!ok) {
-                    container.innerHTML = `<div class="warn">⚠️ ${escapeHtml(data.detail)}</div>`;
+                    container.innerHTML = `<div class="warn"><i data-lucide="triangle-alert"></i> ${escapeHtml(data.detail)}</div>`;
                     return;
                 }
                 const base = `/users/${encodeURIComponent(id)}/export`;
                 const notGenerated = !data.plan_generated
-                    ? `<div class="warn">⚠️ У плана «${escapeHtml(data.plan_title)}» ещё не сгенерированы ответы.
+                    ? `<div class="warn"><i data-lucide="triangle-alert"></i> У плана «${escapeHtml(data.plan_title)}» ещё не сгенерированы ответы.
                        Даты рассчитаны, тексты пустые — запустите генерацию на вкладке «Конструктор плана».</div>` : '';
                 container.innerHTML = `
-                    <h2 class="section-title">📅 Расписание: ${escapeHtml(data.employee.full_name)}</h2>
+                    <h2 class="section-title"><i data-lucide="calendar-days"></i> Расписание: ${escapeHtml(data.employee.full_name)}</h2>
                     <div class="stage-hint">
                         План «${escapeHtml(data.plan_title)}» · дата выхода ${escapeHtml(data.start_date)} ·
                         сообщений: ${(data.messages || []).length}
                     </div>
                     ${notGenerated}
                     <div class="export-links">
-                        <a href="${base}/schedule.md" download>⬇️ schedule.md</a>
-                        <a href="${base}/schedule.json" download>⬇️ schedule.json</a>
+                        <a href="${base}/schedule.md" download><i data-lucide="download"></i> schedule.md</a>
+                        <a href="${base}/schedule.json" download><i data-lucide="download"></i> schedule.json</a>
                     </div>
                     <table class="schedule">
                         <thead><tr><th>Этап</th><th>Подэтап</th><th>Дата и время</th><th>Сообщение</th></tr></thead>
@@ -1646,25 +1646,25 @@
         function renderQuestions(items) {
             const box = document.getElementById('questions-list');
             if (!items.length) {
-                box.innerHTML = '<div class="empty-hint">Открытых вопросов нет 🎉</div>';
+                box.innerHTML = '<div class="empty-hint">Открытых вопросов нет <i data-lucide="party-popper"></i></div>';
                 return;
             }
             box.innerHTML = items.map(q => {
                 const who = [escapeHtml(q.user_name), escapeHtml(q.position)].filter(Boolean).join(', ');
                 const contact = q.contact ? ` · ${escapeHtml(q.contact)}` : '';
                 const resolved = q.resolved_question && q.resolved_question !== q.question
-                    ? `<div class="context-note">🔗 Понято как: «${escapeHtml(q.resolved_question)}»</div>` : '';
+                    ? `<div class="context-note"><i data-lucide="link-2"></i> Понято как: «${escapeHtml(q.resolved_question)}»</div>` : '';
                 if (q.status === 'resolved') {
                     return `<div class="card" style="opacity:.75;">
                         <div>${reasonLabel(q.reason)} <small style="color:#94a3b8;">${escapeHtml(q.created_at)}</small></div>
-                        <div style="margin:6px 0;"><strong>❓ ${escapeHtml(q.question)}</strong> — ${who}${contact}</div>
-                        <div class="answer">✅ ${escapeHtml(q.answer)}</div>
+                        <div style="margin:6px 0;"><strong><i data-lucide="help-circle"></i> ${escapeHtml(q.question)}</strong> — ${who}${contact}</div>
+                        <div class="answer"><i data-lucide="check"></i> ${escapeHtml(q.answer)}</div>
                         <small style="color:#94a3b8;">Ответил: ${escapeHtml(q.answered_by || '')} · ${escapeHtml(q.answered_at || '')}</small>
                     </div>`;
                 }
                 return `<div class="card">
                     <div>${reasonLabel(q.reason)} <small style="color:#94a3b8;">${escapeHtml(q.created_at)}</small></div>
-                    <div style="margin:6px 0;"><strong>❓ ${escapeHtml(q.question)}</strong></div>
+                    <div style="margin:6px 0;"><strong><i data-lucide="help-circle"></i> ${escapeHtml(q.question)}</strong></div>
                     <div style="font-size:13px;color:#475569;">От: ${who}${contact}${q.mentor ? ' · наставник: ' + escapeHtml(q.mentor) : ''}</div>
                     ${resolved}
                     <textarea id="ans-${q.id}" rows="3" style="width:100%;margin-top:8px;" placeholder="Ответ сотруднику (можно после консультации со специалистом)"></textarea>
@@ -1694,10 +1694,17 @@
          чтобы иконки в динамически вставленном HTML тоже отрисовывались. -->
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
     <script>
+        let _iconObserver = null;
         function refreshIcons() {
-            if (window.lucide) lucide.createIcons({ attrs: { 'stroke-width': 1.5, width: 18, height: 18 } });
+            if (!window.lucide) return;
+            if (_iconObserver) _iconObserver.disconnect();   // не ловим свои же вставки svg
+            lucide.createIcons({ attrs: { 'stroke-width': 1.5, width: 18, height: 18 } });
+            if (_iconObserver) _iconObserver.observe(document.body, { childList: true, subtree: true });
         }
-        window.addEventListener('load', refreshIcons);
+        window.addEventListener('load', () => {
+            _iconObserver = new MutationObserver(() => refreshIcons());
+            refreshIcons();   // отрисовать иконки в текущем и во всём динамически вставляемом HTML
+        });
     </script>
 </body>
 </html>
