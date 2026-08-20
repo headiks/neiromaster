@@ -1668,7 +1668,7 @@
                     <div style="font-size:13px;color:#475569;">От: ${who}${contact}${q.mentor ? ' · наставник: ' + escapeHtml(q.mentor) : ''}</div>
                     ${resolved}
                     <textarea id="ans-${q.id}" rows="3" style="width:100%;margin-top:8px;" placeholder="Ответ сотруднику (можно после консультации со специалистом)"></textarea>
-                    <button class="primary-btn" style="margin-top:6px;" onclick="resolveQuestion('${q.id}')">Ответить</button>
+                    <button class="primary-btn" style="margin-top:6px;" onclick="resolveQuestion('${q.id}')"><i data-lucide="send-horizontal"></i> Отправить ответ</button>
                 </div>`;
             }).join('');
             refreshIcons();

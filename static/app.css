@@ -307,6 +307,11 @@ dialog::backdrop { background: color-mix(in srgb, var(--color-neutral-900) 50%, 
     box-shadow: none !important;
 }
 .auth-card::before { content: none !important; }   /* лого-марк теперь SVG в разметке */
+.auth-card .kicker {
+    font-size: 11px !important; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--color-accent) !important; margin: 0 0 6px !important;
+    font-family: var(--font-heading); font-weight: 600;
+}
 .auth-card h1 { font-size: 26px !important; letter-spacing: -0.015em; margin-bottom: 4px; }
 .auth-card .subtitle { color: var(--muted); line-height: 1.5; margin-bottom: 26px !important; }
 .auth-card label { color: color-mix(in srgb, var(--color-text) 70%, transparent) !important; font-size: 12px; font-weight: 500; }
