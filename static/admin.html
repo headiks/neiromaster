@@ -324,13 +324,6 @@
         <div class="folder-grid" id="folder-grid"><div class="empty-hint">Загрузка папок...</div></div>
 
         <div class="section-head-row" style="margin-top:34px;">
-            <h2 class="section-title"><i data-lucide="layers"></i> Этапы обучения</h2>
-            <button class="ghost-btn" onclick="openStageDialog()"><i data-lucide="plus"></i> Новый этап</button>
-        </div>
-        <div class="stage-hint">Этапы и подэтапы задают структуру обучения. К этапам привязываются папки; текущий этап сотрудника берётся из его прогресса.</div>
-        <div id="stage-list"><div class="empty-hint">Загрузка этапов...</div></div>
-
-        <div class="section-head-row" style="margin-top:34px;">
             <h2 class="section-title"><i data-lucide="file-text"></i> Документы</h2>
             <button class="ghost-btn" onclick="reanalyzeAll()"><i data-lucide="refresh-cw"></i> Переанализировать всё</button>
         </div>
@@ -537,35 +530,11 @@
             <div class="stage-hint" style="margin:0 0 8px;">Смысловые признаки, по которым ассистент относит документ к папке (не просто ключевые слова).</div>
             <div id="folder-criteria"></div>
             <button class="icon-btn" onclick="addCriterion()" style="margin-top:6px;"><i data-lucide="plus"></i> Добавить критерий</button>
-            <div class="field" style="margin:16px 0 6px;"><label>Связанные этапы</label></div>
-            <div id="folder-stages" class="chk-grid"></div>
             <div class="error" id="folder-error" style="display:none;margin-top:12px;"></div>
         </div>
         <div style="display:flex;gap:10px;margin-top:16px;">
             <button class="primary-btn" onclick="submitFolder()"><i data-lucide="save"></i> Сохранить</button>
             <button class="ghost-btn" onclick="document.getElementById('folder-dialog').close()">Отмена</button>
-        </div>
-    </dialog>
-
-    <dialog id="stage-dialog" style="max-width:620px;width:92vw;">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-            <h3 style="margin:0;" id="stage-dialog-title">Новый этап</h3>
-            <button class="ghost-btn" onclick="document.getElementById('stage-dialog').close()">Закрыть</button>
-        </div>
-        <div style="margin-top:14px;max-height:74vh;overflow:auto;">
-            <input type="hidden" id="stage-id">
-            <div class="field" style="margin-bottom:12px;"><label>Название этапа *</label>
-                <input type="text" id="stage-title" placeholder="Например: Введение в должность"></div>
-            <div class="field" style="margin-bottom:12px;"><label>Описание</label>
-                <textarea id="stage-description" placeholder="Чему посвящён этап"></textarea></div>
-            <div class="field" style="margin-bottom:6px;"><label>Подэтапы</label></div>
-            <div id="stage-substages"></div>
-            <button class="icon-btn" onclick="addKnSubstage()" style="margin-top:6px;"><i data-lucide="plus"></i> Добавить подэтап</button>
-            <div class="error" id="stage-error" style="display:none;margin-top:12px;"></div>
-        </div>
-        <div style="display:flex;gap:10px;margin-top:16px;">
-            <button class="primary-btn" onclick="submitStage()"><i data-lucide="save"></i> Сохранить</button>
-            <button class="ghost-btn" onclick="document.getElementById('stage-dialog').close()">Отмена</button>
         </div>
     </dialog>
 
@@ -749,15 +718,7 @@
         }
 
         // ---------------- Смысловые папки (управляет человек) ----------------
-        let allStages = [];
         let allFolders = [];
-
-        function stageTitle(id) { const s = allStages.find(x => x.id === id); return s ? s.title : id; }
-
-        function loadStages() {
-            return api('/knowledge/stages').then(r => r.json())
-                .then(d => { allStages = d.stages || []; renderKnStages(); }).catch(() => {});
-        }
 
         function loadFolders() {
             return api('/folders').then(r => r.json())
@@ -774,7 +735,6 @@
                     <div class="name"><i data-lucide="folder"></i> ${escapeHtml(f.name)}${f.enabled ? '' : ' <span class="badge">выкл.</span>'}</div>
                     ${f.description ? `<div class="desc">${escapeHtml(f.description)}</div>` : ''}
                     <div class="count">${f.criteria.length} критериев · ${f.documents || 0} док.</div>
-                    ${f.stage_ids.length ? `<div class="chips">${f.stage_ids.map(id => `<span class="chip">${escapeHtml(stageTitle(id))}</span>`).join('')}</div>` : ''}
                     <div class="row-actions">
                         <button class="icon-btn" title="Изменить" onclick="openFolderDialog('${f.id}')"><i data-lucide="pencil"></i></button>
                         <button class="icon-btn" title="${f.enabled ? 'Отключить' : 'Включить'}" onclick="toggleFolder('${f.id}',${!f.enabled})"><i data-lucide="${f.enabled ? 'eye-off' : 'eye'}"></i></button>
@@ -805,10 +765,6 @@
             crit.innerHTML = '';
             const list = f ? f.criteria : [];
             (list.length ? list : ['']).forEach(c => crit.appendChild(critRow(c)));
-            const sc = document.getElementById('folder-stages');
-            sc.innerHTML = allStages.length
-                ? allStages.map(s => `<label><input type="checkbox" value="${s.id}" ${f && f.stage_ids.includes(s.id) ? 'checked' : ''}> ${escapeHtml(s.title)}</label>`).join('')
-                : '<div class="empty-hint">Этапов пока нет</div>';
             document.getElementById('folder-error').style.display = 'none';
             document.getElementById('folder-dialog').showModal();
             refreshIcons();
@@ -820,9 +776,8 @@
             const err = document.getElementById('folder-error');
             if (!name) { err.textContent = 'Укажите название'; err.style.display = 'block'; return; }
             const criteria = [...document.querySelectorAll('#folder-criteria textarea')].map(t => t.value.trim()).filter(Boolean);
-            const stage_ids = [...document.querySelectorAll('#folder-stages input:checked')].map(c => c.value);
             const description = document.getElementById('folder-description').value.trim();
-            const body = JSON.stringify({ name, description, criteria, stage_ids });
+            const body = JSON.stringify({ name, description, criteria });
             const opts = { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body };
             api(id ? '/folders/' + id : '/folders', opts)
                 .then(r => r.json().then(d => ({ ok: r.ok, d })))
@@ -842,77 +797,6 @@
             const f = allFolders.find(x => x.id === id);
             if (!confirm(`Удалить папку «${f ? f.name : ''}»? Документы останутся в общей базе.`)) return;
             api('/folders/' + id, { method: 'DELETE' }).then(() => loadFolders());
-        }
-
-        // ---------------- Этапы обучения ----------------
-        function renderKnStages() {
-            const box = document.getElementById('stage-list');
-            if (!allStages.length) { box.innerHTML = `<div class="empty-hint">Этапов пока нет.</div>`; return; }
-            box.innerHTML = allStages.map(s => `
-                <div class="card stage-card">
-                    <div style="min-width:0;">
-                        <div style="font-weight:600;">${escapeHtml(s.title)}</div>
-                        ${s.description ? `<div style="color:#64748b;font-size:12px;margin-top:2px;">${escapeHtml(s.description)}</div>` : ''}
-                        <div class="subs">${s.substages.length} подэтапов${s.substages.length ? ': ' + s.substages.map(x => escapeHtml(x.title)).join(' · ') : ''}</div>
-                    </div>
-                    <div style="display:flex;gap:6px;flex-shrink:0;">
-                        <button class="icon-btn" onclick="openStageDialog('${s.id}')"><i data-lucide="pencil"></i></button>
-                        <button class="icon-btn danger" onclick="deleteStage('${s.id}')"><i data-lucide="trash-2"></i></button>
-                    </div>
-                </div>
-            `).join('');
-            refreshIcons();
-        }
-
-        function subRow(val = '', sid = '') {
-            const div = document.createElement('div');
-            div.className = 'sub-row';
-            div.innerHTML = `<input type="text" placeholder="Название подэтапа">` +
-                `<button class="icon-btn danger" onclick="this.parentElement.remove()"><i data-lucide="x"></i></button>`;
-            const input = div.querySelector('input');
-            input.value = val;
-            input.dataset.sid = sid;
-            return div;
-        }
-        function addKnSubstage() { document.getElementById('stage-substages').appendChild(subRow()); refreshIcons(); }
-
-        function openStageDialog(id) {
-            const s = id ? allStages.find(x => x.id === id) : null;
-            document.getElementById('stage-dialog-title').textContent = s ? 'Изменить этап' : 'Новый этап';
-            document.getElementById('stage-id').value = s ? s.id : '';
-            document.getElementById('stage-title').value = s ? s.title : '';
-            document.getElementById('stage-description').value = s ? s.description : '';
-            const c = document.getElementById('stage-substages');
-            c.innerHTML = '';
-            (s ? s.substages : []).forEach(x => c.appendChild(subRow(x.title, x.id)));
-            document.getElementById('stage-error').style.display = 'none';
-            document.getElementById('stage-dialog').showModal();
-            refreshIcons();
-        }
-
-        function submitStage() {
-            const id = document.getElementById('stage-id').value;
-            const title = document.getElementById('stage-title').value.trim();
-            const err = document.getElementById('stage-error');
-            if (!title) { err.textContent = 'Укажите название'; err.style.display = 'block'; return; }
-            const substages = [...document.querySelectorAll('#stage-substages input')]
-                .map(i => ({ id: i.dataset.sid || '', title: i.value.trim() })).filter(x => x.title);
-            const description = document.getElementById('stage-description').value.trim();
-            const body = JSON.stringify({ title, description, substages });
-            const opts = { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body };
-            api(id ? '/knowledge/stages/' + id : '/knowledge/stages', opts)
-                .then(r => r.json().then(d => ({ ok: r.ok, d })))
-                .then(({ ok, d }) => {
-                    if (!ok) { err.textContent = d.detail || 'Не удалось сохранить'; err.style.display = 'block'; return; }
-                    document.getElementById('stage-dialog').close();
-                    loadStages().then(loadFolders);   // чипы папок ссылаются на названия этапов
-                });
-        }
-
-        function deleteStage(id) {
-            const s = allStages.find(x => x.id === id);
-            if (!confirm(`Удалить этап «${s ? s.title : ''}»?`)) return;
-            api('/knowledge/stages/' + id, { method: 'DELETE' }).then(() => loadStages().then(loadFolders));
         }
 
         function renderDocuments(docs) {
@@ -1053,8 +937,8 @@
         }
 
         loadDocuments();
-        loadStages().then(loadFolders);
-        setInterval(loadDocuments, 8000);   // папки/этапы статичны — обновляем по действию, не по таймеру
+        loadFolders();
+        setInterval(loadDocuments, 8000);   // папки статичны — обновляем по действию, не по таймеру
 
         // ---------------- Конструктор плана ----------------
         let catalog = null;
