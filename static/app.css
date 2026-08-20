@@ -1,263 +1,341 @@
-/* Shared visual system for NeuroMaster */
+/* НейроМастер — визуальная система Industry (пастельная сталь, чертёжные рамки).
+   Один приглушённый акцент на светлом фоне, квадратные углы, тонкие рамки,
+   без теней и градиентов. Загружается ПОСЛЕ инлайновых <style> страниц и
+   перекрывает их через !important — логика и разметка страниц не меняются. */
+
+@import url('https://fonts.googleapis.com/css2?family=Fira+Sans+Condensed:wght@400;500;600;700&family=Fira+Sans:wght@400;500&display=swap');
+
 :root {
-    --ink: #17233b;
-    --muted: #64748b;
-    --line: #dce5f0;
-    --surface: #ffffff;
-    --canvas: #f4f7fb;
-    --blue: #2563eb;
-    --blue-dark: #1d4ed8;
-    --blue-soft: #eaf1ff;
-    --violet: #7357dc;
-    --success: #12825c;
-    --radius: 16px;
-    --shadow: 0 14px 34px rgba(31, 49, 84, .08), 0 2px 6px rgba(31, 49, 84, .03);
+    --color-bg: #f2f2f3;
+    --color-text: #1d1f20;
+    --color-muted: #5b5f63;
+
+    /* Акцент «пастельная сталь» + тональная шкала 100–900 (по OKLCH, в hex для совместимости) */
+    --color-accent: #5980a6;
+    --color-accent-100: #eef2f6;
+    --color-accent-200: #dae3ec;
+    --color-accent-300: #bccbdb;
+    --color-accent-400: #93aac5;
+    --color-accent-500: #5980a6;
+    --color-accent-600: #4d7196;
+    --color-accent-700: #3f5c7c;
+    --color-accent-800: #334a61;
+    --color-accent-900: #243646;
+
+    /* Линии и служебные */
+    --line: #c9ccce;
+    --line-strong: #9aa0a4;
+    --danger: #9b322b;
+    --danger-bg: #f1e2e0;
+    --success: #3f6b4f;
+
+    --font-heading: "Fira Sans Condensed", "Fira Sans", system-ui, sans-serif;
+    --font-body: "Fira Sans", system-ui, sans-serif;
+    --radius: 4px;
+
+    /* Совместимость со старыми переменными разметки — переведены в новую систему */
+    --ink: var(--color-text);
+    --muted: var(--color-muted);
+    --line-color: var(--line);
+    --surface: transparent;
+    --canvas: var(--color-bg);
+    --blue: var(--color-accent);
+    --blue-dark: var(--color-accent-700);
+    --blue-soft: var(--color-accent-100);
+    --violet: var(--color-accent-600);
+    --shadow: none;
 }
 
 * { box-sizing: border-box; }
 
 body {
-    color: var(--ink);
-    background:
-        radial-gradient(900px 420px at 8% -10%, rgba(133, 180, 255, .25), transparent 65%),
-        radial-gradient(800px 440px at 100% 0%, rgba(183, 164, 255, .18), transparent 65%),
-        var(--canvas);
-    line-height: 1.45;
+    font-family: var(--font-body) !important;
+    color: var(--color-text) !important;
+    background: var(--color-bg) !important;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
 }
 
-button, input, select, textarea { font: inherit; }
-button { transition: transform .16s ease, box-shadow .16s ease, background .16s ease, border-color .16s ease; }
-button:not(:disabled):active { transform: translateY(1px); }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-    outline: 3px solid rgba(37, 99, 235, .22);
-    outline-offset: 2px;
+h1, h2, h3, h4, .section-title, .page-head h1, .auth-card h1 {
+    font-family: var(--font-heading) !important;
+    font-weight: 600 !important;
+    letter-spacing: .2px !important;
+    color: var(--color-text) !important;
 }
 
-/* Employee workspace and admin area */
-.app-page, .admin-page {
-    max-width: 1180px;
-    margin: 0 auto;
-    padding: 28px 28px 48px;
+button, input, select, textarea { font: inherit; font-family: var(--font-body); }
+button { transition: background .15s ease, border-color .15s ease, color .15s ease; }
+
+/* Единые состояния фокуса — без дефолтных браузерных */
+:where(button, a, input, select, textarea):focus-visible {
+    outline: 2px solid var(--color-accent) !important;
+    outline-offset: 2px !important;
+    box-shadow: none !important;
 }
 
+/* ---------- Раскладка ---------- */
+.app-page, .admin-page { max-width: 1180px; margin: 0 auto; padding: 28px 28px 56px; }
 .app-page { max-width: 1040px; }
 
-/* Compatibility header for the earlier single-page server build. */
-.app-page > h1 {
+/* ---------- Навбар / шапка ---------- */
+.app-page > h1, .page-head {
     display: flex;
     align-items: center;
-    min-height: 72px;
-    margin: 0;
-    padding: 16px 20px;
-    border: 1px solid rgba(220, 229, 240, .9) !important;
-    border-radius: var(--radius);
-    background: rgba(255, 255, 255, .88);
-    box-shadow: var(--shadow);
-    color: var(--ink) !important;
-    font-size: 22px !important;
-    letter-spacing: -.45px;
+    min-height: 64px;
+    margin: 0 0 4px;
+    padding: 12px 18px !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+}
+.page-head h1, .app-page > h1 {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 21px !important; letter-spacing: .2px !important;
+    color: var(--color-text) !important;
+}
+.page-head h1::first-letter { color: inherit; }
+.head-actions { gap: 8px !important; color: var(--color-muted) !important; }
+#whoami { padding: 7px 9px; font-size: 13px; white-space: nowrap; color: var(--color-muted); }
+
+/* ---------- Кнопки ---------- */
+.primary-btn, #ask-btn, .auth-card button {
+    border: 1px solid var(--color-accent) !important;
+    border-radius: var(--radius) !important;
+    background: var(--color-accent) !important;
+    color: #fff !important;
+    box-shadow: none !important;
+    font-weight: 500 !important;
+    cursor: pointer;
+}
+.primary-btn:hover, #ask-btn:hover, .auth-card button:hover {
+    background: var(--color-accent-700) !important;
+    border-color: var(--color-accent-700) !important;
+    transform: none !important;
+}
+.primary-btn:active, #ask-btn:active, .auth-card button:active { background: var(--color-accent-800) !important; }
+.primary-btn:disabled, #ask-btn:disabled, .auth-card button:disabled {
+    background: var(--color-accent-200) !important; border-color: var(--color-accent-200) !important; color: #fff !important; cursor: not-allowed;
 }
 
-.page-head {
-    min-height: 72px;
-    padding: 12px 14px 12px 20px;
-    border: 1px solid rgba(220, 229, 240, .9) !important;
-    border-radius: var(--radius);
-    background: rgba(255, 255, 255, .88);
-    box-shadow: var(--shadow);
-    backdrop-filter: blur(10px);
-}
-
-.page-head h1 {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 22px !important;
-    letter-spacing: -.45px;
-    color: var(--ink) !important;
-}
-
-.page-head h1::first-letter { color: var(--blue); }
-.head-actions { gap: 8px !important; color: var(--muted) !important; }
-#whoami { padding: 7px 9px; font-size: 13px; white-space: nowrap; }
-
-.admin-link, .head-btn, .ghost-btn, .toggle-btn, .new-dialog-btn, .icon-btn {
-    border-color: var(--line) !important;
-    border-radius: 10px !important;
-    background: #fff !important;
-    color: #40516d !important;
+.admin-link, .head-btn, .ghost-btn, .toggle-btn, .new-dialog-btn, .icon-btn, .del-btn {
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    background: transparent !important;
+    color: var(--color-text) !important;
+    box-shadow: none !important;
     font-weight: 500;
+    cursor: pointer;
 }
-
 .admin-link:hover, .head-btn:hover, .ghost-btn:hover, .toggle-btn:hover, .new-dialog-btn:hover, .icon-btn:hover {
-    border-color: #b8c9e4 !important;
-    background: #f5f8ff !important;
-    color: var(--blue-dark) !important;
+    border-color: var(--color-accent) !important;
+    background: var(--color-accent-100) !important;
+    color: var(--color-accent-800) !important;
 }
+.del-btn { color: var(--danger) !important; }
+.del-btn:hover { border-color: var(--danger) !important; background: var(--danger-bg) !important; color: var(--danger) !important; }
 
-.primary-btn, #ask-btn {
-    border-radius: 10px !important;
-    background: linear-gradient(135deg, #3475ef, #245dd9) !important;
-    box-shadow: 0 7px 16px rgba(37, 99, 235, .22);
-    font-weight: 600;
-}
-
-.primary-btn:hover, #ask-btn:hover { background: linear-gradient(135deg, #2869e5, #1d4ed8) !important; box-shadow: 0 9px 19px rgba(37, 99, 235, .27); transform: translateY(-1px); }
-.primary-btn:disabled, #ask-btn:disabled { box-shadow: none; }
-
-h2.section-title {
-    color: var(--ink) !important;
-    font-size: 18px !important;
-    letter-spacing: -.25px;
-}
-
+/* ---------- Заголовки секций ---------- */
+h2.section-title { font-size: 18px !important; letter-spacing: .2px; }
 .chat-header { margin-top: 30px !important; }
-.chat-header:first-of-type { margin-top: 26px !important; }
+.chat-header:first-of-type { margin-top: 24px !important; }
 
+/* ---------- Инфоблоки-заметки ---------- */
 .plan-note, .context-note, .note {
-    border: 1px solid #d7e4ff !important;
-    border-left: 4px solid var(--blue) !important;
-    border-radius: 12px !important;
-    background: #f1f6ff !important;
-    color: #254a84 !important;
+    border: 1px solid var(--line) !important;
+    border-left: 3px solid var(--color-accent) !important;
+    border-radius: var(--radius) !important;
+    background: var(--color-accent-100) !important;
+    color: var(--color-accent-900) !important;
     padding: 12px 15px !important;
 }
 
+/* ---------- Таблицы-чертежи ---------- */
 table.schedule {
     margin-top: 12px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--line) !important;
     border-radius: var(--radius) !important;
-    box-shadow: var(--shadow);
+    box-shadow: none !important;
     overflow: hidden;
-}
-
-table.schedule th { background: #f6f8fc !important; color: #566681 !important; font-weight: 600; letter-spacing: .01em; }
-table.schedule td { border-bottom-color: #e9eff6 !important; }
-table.schedule tbody tr:last-child td { border-bottom: 0; }
-table.schedule tbody tr:hover { background: #fafcff; }
-
-.input-area {
-    padding: 8px;
-    margin: 14px 0 18px !important;
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    background: #fff;
-    box-shadow: var(--shadow);
-}
-
-#question-input {
-    min-width: 0;
-    padding: 12px 14px !important;
-    border: 0 !important;
-    border-radius: 10px !important;
     background: transparent;
-    color: var(--ink);
 }
-#question-input:focus { outline: 0; }
+table.schedule th {
+    background: var(--color-accent-100) !important;
+    color: var(--color-accent-800) !important;
+    font-family: var(--font-heading);
+    font-weight: 600; letter-spacing: .2px;
+    border-bottom: 1px solid var(--line) !important;
+}
+table.schedule td { border-bottom: 1px solid var(--line) !important; }
+table.schedule tbody tr:last-child td { border-bottom: 0 !important; }
+table.schedule tbody tr:hover { background: var(--color-accent-100) !important; }
+
+/* ---------- Поле ввода вопроса ---------- */
+.input-area {
+    padding: 6px !important;
+    margin: 14px 0 18px !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+#question-input {
+    min-width: 0; padding: 12px 14px !important;
+    border: 0 !important; border-radius: 0 !important;
+    background: transparent; color: var(--color-text);
+}
+#question-input:focus { outline: 0 !important; }
 #ask-btn { padding: 11px 22px !important; }
 
-.card, .stage-card {
-    border: 1px solid var(--line);
+/* ---------- Карточки-чертежи ---------- */
+.card, .stage-card, .doc-item, .folder-card, .sub-item {
+    border: 1px solid var(--line) !important;
     border-radius: var(--radius) !important;
-    box-shadow: var(--shadow) !important;
+    background: transparent !important;
+    box-shadow: none !important;
 }
-
-.card { padding: 22px !important; }
+.card { padding: 20px !important; }
 .card h3 { font-size: 16px; }
-.answer {
-    border: 1px solid #d9e5ff !important;
-    border-left: 4px solid var(--blue) !important;
-    border-radius: 12px !important;
-    background: #f5f8ff !important;
-    line-height: 1.58;
-}
-.candidate { border-radius: 0 10px 10px 0; padding: 10px 12px !important; }
-.candidate.relevant { border: 1px solid #ccebdc; border-left: 4px solid #22a06b; }
-.badge, .status-badge { font-weight: 600; letter-spacing: .01em; }
-.history-item { border-bottom-color: var(--line) !important; padding: 15px 4px !important; }
-.empty-hint { color: #8492a8 !important; }
+.folder-card { border-left: 3px solid var(--color-accent) !important; }
+.stage-card { border-left: 3px solid var(--color-accent) !important; }
+.doc-item:hover, .folder-card:hover { border-color: var(--color-accent) !important; }
 
-/* Admin */
+.answer {
+    border: 1px solid var(--line) !important;
+    border-left: 3px solid var(--color-accent) !important;
+    border-radius: var(--radius) !important;
+    background: var(--color-accent-100) !important;
+    line-height: 1.6;
+}
+.candidate { border: 1px solid var(--line) !important; border-radius: var(--radius) !important; padding: 10px 12px !important; }
+.candidate.relevant { border-left: 3px solid var(--color-accent) !important; background: var(--color-accent-100) !important; }
+
+/* ---------- Теги-метки ---------- */
+.badge, .status-badge {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--color-text);
+    font-family: var(--font-heading);
+    font-weight: 500; letter-spacing: .2px;
+    padding: 2px 8px;
+}
+.status-badge.indexed, .status-badge.done { border-color: var(--success); color: var(--success); }
+.status-badge.error { border-color: var(--danger); color: var(--danger); }
+.status-badge.processing, .status-badge.uploaded { border-color: var(--color-accent); color: var(--color-accent-800); }
+
+.history-item { border-bottom: 1px solid var(--line) !important; padding: 15px 4px !important; }
+.empty-hint { color: var(--color-muted) !important; }
+
+/* ---------- Админка: вкладки ---------- */
 .tabs {
     display: inline-flex !important;
     margin-top: 22px !important;
-    padding: 4px;
+    padding: 3px;
     gap: 2px !important;
     border: 1px solid var(--line) !important;
-    border-radius: 12px;
-    background: #fff;
-    box-shadow: 0 3px 10px rgba(31, 49, 84, .04);
-}
-.tab { border-radius: 8px !important; border-bottom: 0 !important; margin-bottom: 0 !important; padding: 9px 15px !important; font-size: 14px !important; }
-.tab.active { color: var(--blue-dark) !important; border-bottom-color: transparent !important; background: var(--blue-soft) !important; }
-.tab-pane { padding-bottom: 12px; }
-.dropzone {
-    border-color: #b9cce8 !important;
     border-radius: var(--radius) !important;
-    background: rgba(255,255,255,.78) !important;
-    padding: 36px 28px !important;
-    box-shadow: var(--shadow);
+    background: transparent !important;
+    box-shadow: none !important;
 }
-.dropzone:hover { border-color: var(--blue) !important; background: #f7faff !important; }
-.doc-item, .folder-card, .sub-item { border: 1px solid var(--line); box-shadow: 0 3px 12px rgba(31,49,84,.04) !important; }
-.doc-item:hover { border-color: #c6d5e9; }
-.folder-card { border-left-color: var(--violet) !important; }
-.stage-card { border-left-color: var(--blue) !important; }
-
-input[type=text], input[type=date], input[type=time], input[type=number], input[type=password], select, textarea,
-dialog input {
-    border-color: #cbd8e8 !important;
-    border-radius: 9px !important;
-    color: var(--ink);
-    transition: border-color .16s ease, box-shadow .16s ease;
+.tab {
+    border: 1px solid transparent !important;
+    border-radius: 2px !important;
+    margin-bottom: 0 !important;
+    padding: 9px 15px !important;
+    font-family: var(--font-heading);
+    font-size: 14px !important; font-weight: 500;
+    background: transparent !important; color: var(--color-muted) !important;
 }
-input[type=text]:focus, input[type=date]:focus, input[type=time]:focus, input[type=number]:focus, input[type=password]:focus, select:focus, textarea:focus,
-dialog input:focus { border-color: var(--blue) !important; box-shadow: 0 0 0 3px rgba(37,99,235,.12); outline: 0; }
-.progress-bar { background: #e7edf6 !important; }
-.progress-bar > div { background: linear-gradient(90deg, #3475ef, #7357dc) !important; }
-.error { border: 1px solid #fecaca; }
+.tab.active { color: #fff !important; background: var(--color-accent) !important; border-color: var(--color-accent) !important; }
+.tab-pane { padding-bottom: 12px; }
 
-dialog { border: 1px solid var(--line) !important; border-radius: var(--radius) !important; box-shadow: 0 24px 70px rgba(15,23,42,.22) !important; }
+/* ---------- Дроп-зона загрузки ---------- */
+.dropzone {
+    border: 1px dashed var(--line-strong) !important;
+    border-radius: var(--radius) !important;
+    background: transparent !important;
+    padding: 34px 28px !important;
+    box-shadow: none !important;
+    color: var(--color-muted);
+}
+.dropzone:hover { border-color: var(--color-accent) !important; background: var(--color-accent-100) !important; }
 
-/* Authentication pages */
+/* ---------- Поля формы ---------- */
+input[type=text], input[type=date], input[type=time], input[type=number], input[type=password],
+input[type=email], select, textarea, dialog input {
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    background: transparent;
+    color: var(--color-text);
+    transition: border-color .15s ease;
+}
+input[type=text]:focus, input[type=date]:focus, input[type=time]:focus, input[type=number]:focus,
+input[type=password]:focus, input[type=email]:focus, select:focus, textarea:focus, dialog input:focus {
+    border-color: var(--color-accent) !important;
+    outline: 2px solid var(--color-accent) !important;
+    outline-offset: 1px;
+    box-shadow: none !important;
+}
+
+.progress-bar { background: var(--color-accent-100) !important; border: 1px solid var(--line); border-radius: var(--radius) !important; }
+.progress-bar > div { background: var(--color-accent) !important; }
+
+.error { border: 1px solid var(--danger) !important; background: var(--danger-bg) !important; color: var(--danger) !important; border-radius: var(--radius) !important; }
+.warn { border: 1px solid var(--color-accent) !important; background: var(--color-accent-100) !important; color: var(--color-accent-900) !important; border-radius: var(--radius) !important; }
+
+/* ---------- Модальное окно ---------- */
+dialog {
+    border: 1px solid var(--line-strong) !important;
+    border-radius: var(--radius) !important;
+    background: var(--color-bg) !important;
+    color: var(--color-text) !important;
+    box-shadow: none !important;
+}
+dialog::backdrop { background: rgba(29, 31, 32, .45); }
+
+/* ---------- Страницы входа ---------- */
 .auth-page {
+    font-family: var(--font-body);
+    background: var(--color-bg) !important;
     padding: 24px;
     overflow-x: hidden;
 }
-.auth-page::before, .auth-page::after {
-    content: "";
-    position: fixed;
-    z-index: -1;
-    border-radius: 50%;
-    filter: blur(2px);
-}
-.auth-page::before { width: 330px; height: 330px; top: -130px; left: -90px; background: rgba(86, 139, 255, .2); }
-.auth-page::after { width: 360px; height: 360px; bottom: -170px; right: -120px; background: rgba(142, 108, 246, .16); }
+.auth-page::before, .auth-page::after { content: none !important; }   /* убраны размытые пятна */
 .auth-card {
     position: relative;
-    width: min(100%, 410px) !important;
-    padding: 34px !important;
-    border: 1px solid rgba(220,229,240,.95);
-    border-radius: 20px !important;
-    box-shadow: 0 20px 50px rgba(31,49,84,.12) !important;
+    width: min(100%, 400px) !important;
+    padding: 32px !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    background: transparent !important;
+    box-shadow: none !important;
 }
+/* Лого-марк: квадрат-схема (чертёж), без эмодзи и градиента */
 .auth-card::before {
     content: "";
     display: block;
-    width: 42px;
-    height: 42px;
+    width: 34px; height: 34px;
     margin-bottom: 18px;
-    border-radius: 13px;
-    background: linear-gradient(135deg, #3475ef, #7357dc);
-    box-shadow: 0 8px 16px rgba(78, 101, 217, .25);
+    border: 1.5px solid var(--color-accent);
+    border-radius: 2px;
+    background:
+        linear-gradient(var(--color-accent), var(--color-accent)) center/100% 1.5px no-repeat,
+        linear-gradient(var(--color-accent), var(--color-accent)) center/1.5px 100% no-repeat;
+    box-shadow: none !important;
 }
-.auth-card h1 { color: var(--ink) !important; font-size: 23px !important; letter-spacing: -.35px; }
-.auth-card .subtitle { line-height: 1.5; margin-bottom: 26px !important; }
-.auth-card label { color: #45566f !important; font-weight: 600; }
-.auth-card input { padding: 11px 12px !important; margin-bottom: 18px !important; }
-.auth-card button { border-radius: 10px !important; background: linear-gradient(135deg, #3475ef, #245dd9) !important; box-shadow: 0 7px 16px rgba(37,99,235,.22); font-weight: 600; }
-.auth-card .back { color: #536681 !important; }
-.auth-card .back:hover { color: var(--blue-dark) !important; }
+.auth-card h1 { font-size: 22px !important; letter-spacing: .2px; margin-bottom: 4px; }
+.auth-card .subtitle { color: var(--color-muted); line-height: 1.5; margin-bottom: 24px !important; }
+.auth-card label { color: var(--color-text) !important; font-weight: 500; }
+.auth-card input { padding: 11px 12px !important; margin-bottom: 16px !important; }
+.auth-card button { width: 100%; padding: 11px !important; }
+.auth-card .back { color: var(--color-accent-700) !important; }
+.auth-card .back:hover { color: var(--color-accent-900) !important; }
+
+/* ---------- Векторные иконки (Lucide) ---------- */
+[data-lucide], .lucide { width: 18px; height: 18px; stroke-width: 1.5; vertical-align: -3px; }
+.page-head [data-lucide] { color: var(--color-accent); }
 
 @media (max-width: 760px) {
     .app-page, .admin-page { padding: 16px 14px 32px; }
