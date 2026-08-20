@@ -277,42 +277,42 @@
 </head>
 <body class="admin-page">
     <div class="page-head">
-        <h1>🧠 Админка НейроМастер</h1>
+        <h1><svg class="nm-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="3" width="18" height="18"/><circle cx="8" cy="9" r="1.5"/><circle cx="16" cy="9" r="1.5"/><circle cx="12" cy="16" r="1.5"/><path d="M8 9h8M8.6 10.2 11.4 15M15.4 10.2 12.6 15"/></svg> Админка</h1>
         <div class="head-actions">
             <span id="whoami"></span>
-            <a class="ghost-btn" href="/" style="text-decoration:none;">Страница сотрудника</a>
-            <button class="ghost-btn" onclick="openPasswordDialog()">Сменить пароль</button>
-            <button class="ghost-btn" onclick="logout()">Выйти</button>
+            <a class="ghost-btn" href="/" style="text-decoration:none;"><i data-lucide="user"></i> Страница сотрудника</a>
+            <button class="ghost-btn" onclick="openPasswordDialog()"><i data-lucide="key-round"></i> Сменить пароль</button>
+            <button class="ghost-btn" onclick="logout()"><i data-lucide="log-out"></i> Выйти</button>
         </div>
     </div>
 
     <div class="tabs">
-        <button class="tab active" data-tab="docs">📁 База знаний</button>
-        <button class="tab" data-tab="builder">🗓️ Конструктор плана</button>
-        <button class="tab" data-tab="employees">👥 Пользователи</button>
-        <button class="tab" data-tab="questions">❓ Вопросы <span id="questions-badge" class="q-badge" style="display:none;"></span></button>
+        <button class="tab active" data-tab="docs"><i data-lucide="database"></i> База знаний</button>
+        <button class="tab" data-tab="builder"><i data-lucide="calendar-cog"></i> Конструктор плана</button>
+        <button class="tab" data-tab="employees"><i data-lucide="users"></i> Пользователи</button>
+        <button class="tab" data-tab="questions"><i data-lucide="help-circle"></i> Вопросы <span id="questions-badge" class="q-badge" style="display:none;"></span></button>
     </div>
 
     <!-- ==================== БАЗА ЗНАНИЙ ==================== -->
     <div class="tab-pane active" id="pane-docs">
-        <h2 class="section-title">📥 Загрузка регламентов</h2>
+        <h2 class="section-title"><i data-lucide="upload-cloud"></i> Загрузка регламентов</h2>
         <div class="dropzone" id="dropzone">
-            <div>⬆️ Перетащите PDF или DOCX сюда, или нажмите, чтобы выбрать файл</div>
+            <div><i data-lucide="upload" style="width:28px;height:28px;display:block;margin:0 auto 8px;color:var(--color-accent);"></i> Перетащите PDF или DOCX сюда, или нажмите, чтобы выбрать файл</div>
             <small>PDF, DOCX, DOC, PPTX, HTML, MD, TXT · до 50 МБ · папку по содержанию выберет ассистент</small>
             <input type="file" id="file-input" multiple accept=".pdf,.docx,.doc,.pptx,.html,.htm,.md,.txt" />
         </div>
         <div class="upload-progress" id="upload-progress"></div>
 
-        <h2 class="section-title">🗂️ Смысловые папки</h2>
+        <h2 class="section-title"><i data-lucide="folders"></i> Смысловые папки</h2>
         <div class="folder-grid" id="folder-grid"><div class="empty-hint">Загрузка папок...</div></div>
 
-        <h2 class="section-title">📄 Документы</h2>
+        <h2 class="section-title"><i data-lucide="file-text"></i> Документы</h2>
         <div class="doc-list" id="doc-list"><div class="empty-hint">Загрузка списка документов...</div></div>
     </div>
 
     <!-- ==================== ВОПРОСЫ БЕЗ ОТВЕТА ==================== -->
     <div class="tab-pane" id="pane-questions">
-        <h2 class="section-title">❓ Вопросы, на которые ассистент не ответил</h2>
+        <h2 class="section-title"><i data-lucide="help-circle"></i> Вопросы, на которые ассистент не ответил</h2>
         <div class="stage-hint">
             Сюда попадают вопросы сотрудников с пометкой ЧС (⚠️) и те, на которые в
             регламентах не нашлось ответа. Ответьте — сотрудник увидит ответ в личном кабинете.
@@ -328,7 +328,7 @@
 
     <!-- ==================== КОНСТРУКТОР ПЛАНА ==================== -->
     <div class="tab-pane" id="pane-builder">
-        <h2 class="section-title">🗓️ Конструктор плана адаптации</h2>
+        <h2 class="section-title"><i data-lucide="calendar-cog"></i> Конструктор плана адаптации</h2>
 
         <div class="toolbar">
             <div class="field">
@@ -385,7 +385,7 @@
 
     <!-- ==================== ПОЛЬЗОВАТЕЛИ ==================== -->
     <div class="tab-pane" id="pane-employees">
-        <h2 class="section-title">👥 Пользователи, роли и назначенные планы</h2>
+        <h2 class="section-title"><i data-lucide="users"></i> Пользователи, роли и назначенные планы</h2>
 
         <div class="card">
             <div id="employee-form-title" style="font-weight:600;color:#0f172a;margin-bottom:12px;">Новый сотрудник</div>
@@ -1619,8 +1619,8 @@
         // ==================== Вопросы без ответа ====================
         function reasonLabel(r) {
             return r === 'escalate'
-                ? '<span class="badge escalate">⚠️ ЧС</span>'
-                : '<span class="badge" style="background:#e0e7ff;color:#3730a3;">нет ответа</span>';
+                ? '<span class="badge escalate"><i data-lucide="triangle-alert"></i> ЧС</span>'
+                : '<span class="badge"><i data-lucide="search-x"></i> нет ответа</span>';
         }
 
         function updateQuestionsBadge(count) {
@@ -1671,6 +1671,7 @@
                     <button class="primary-btn" style="margin-top:6px;" onclick="resolveQuestion('${q.id}')">Ответить</button>
                 </div>`;
             }).join('');
+            refreshIcons();
         }
 
         function resolveQuestion(qid) {
@@ -1687,6 +1688,16 @@
         }
 
         refreshQuestionsBadge();
+    </script>
+
+    <!-- Векторные иконки Lucide. refreshIcons() зовётся после AJAX-рендеров списков,
+         чтобы иконки в динамически вставленном HTML тоже отрисовывались. -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script>
+        function refreshIcons() {
+            if (window.lucide) lucide.createIcons({ attrs: { 'stroke-width': 1.5, width: 18, height: 18 } });
+        }
+        window.addEventListener('load', refreshIcons);
     </script>
 </body>
 </html>

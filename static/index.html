@@ -179,29 +179,29 @@
 </head>
 <body class="app-page">
     <div class="page-head">
-        <h1>🧠 НейроМастер</h1>
+        <h1><svg class="nm-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="3" width="18" height="18"/><circle cx="8" cy="9" r="1.5"/><circle cx="16" cy="9" r="1.5"/><circle cx="12" cy="16" r="1.5"/><path d="M8 9h8M8.6 10.2 11.4 15M15.4 10.2 12.6 15"/></svg> НейроМастер</h1>
         <div class="head-actions">
             <span id="whoami"></span>
-            <a class="admin-link" id="admin-link" href="/admin" style="display:none;">Админка</a>
-            <button class="head-btn" onclick="openPasswordDialog()">Сменить пароль</button>
-            <button class="head-btn" onclick="logout()">Выйти</button>
+            <a class="admin-link" id="admin-link" href="/admin" style="display:none;"><i data-lucide="shield"></i> Админка</a>
+            <button class="head-btn" onclick="openPasswordDialog()"><i data-lucide="key-round"></i> Сменить пароль</button>
+            <button class="head-btn" onclick="logout()"><i data-lucide="log-out"></i> Выйти</button>
         </div>
     </div>
 
     <div class="chat-header" style="margin-top:28px;">
-        <h2 class="section-title">📅 Мой план адаптации</h2>
+        <h2 class="section-title"><i data-lucide="calendar-days"></i> Мой план адаптации</h2>
         <button class="toggle-btn" id="plan-toggle" onclick="togglePlan()" style="display:none;">Показать весь план</button>
     </div>
     <div id="my-plan"><div class="empty-hint">Загрузка плана...</div></div>
 
     <div id="my-questions-block" style="margin-top:28px;display:none;">
-        <h2 class="section-title">🙋 Мои вопросы специалисту</h2>
+        <h2 class="section-title"><i data-lucide="messages-square"></i> Мои вопросы специалисту</h2>
         <div id="my-questions"></div>
     </div>
 
     <div class="chat-header">
-        <h2 class="section-title">💬 Задать вопрос</h2>
-        <button class="new-dialog-btn" onclick="startNewDialog()" title="Забыть историю текущего диалога">🔄 Новый диалог</button>
+        <h2 class="section-title"><i data-lucide="message-square"></i> Задать вопрос</h2>
+        <button class="new-dialog-btn" onclick="startNewDialog()" title="Забыть историю текущего диалога"><i data-lucide="refresh-cw"></i> Новый диалог</button>
     </div>
     <div class="input-area">
         <input type="text" id="question-input" placeholder="Например: что положено из спецодежды?" />
@@ -209,7 +209,7 @@
     </div>
     <div id="result"></div>
     <div id="history">
-        <h3>📋 История</h3>
+        <h3><i data-lucide="history"></i> История</h3>
         <div id="history-list"></div>
     </div>
 
@@ -221,7 +221,7 @@
         <input type="password" id="new-password" autocomplete="new-password">
         <div class="error" id="password-error" style="display:none;margin-bottom:12px;"></div>
         <div style="display:flex;gap:10px;">
-            <button class="head-btn" style="flex:1;background:#3b82f6;color:white;border:none;padding:9px;"
+            <button class="primary-btn" style="flex:1;padding:9px;"
                     onclick="submitPasswordChange()">Сменить</button>
             <button class="head-btn" onclick="document.getElementById('password-dialog').close()">Отмена</button>
         </div>
@@ -508,6 +508,16 @@
             `;
             historyList.prepend(entry);
         }
+    </script>
+
+    <!-- Векторные иконки Lucide. refreshIcons() вызывается после AJAX-рендеров,
+         чтобы иконки в динамически вставленном HTML тоже отрисовывались. -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script>
+        function refreshIcons() {
+            if (window.lucide) lucide.createIcons({ attrs: { 'stroke-width': 1.5, width: 18, height: 18 } });
+        }
+        window.addEventListener('load', refreshIcons);
     </script>
 </body>
 </html>
