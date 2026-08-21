@@ -12,15 +12,39 @@ data/knowledge_seed.json. То же, что делает приложение п
 ошибке они соберутся при первом изменении папки в админке или при рестарте.
 """
 
+import os
 import sys
 import json
 from pathlib import Path
 
-import db
-import folders
-import stages
+BASE = Path(__file__).resolve().parent
 
-SEED_PATH = Path(__file__).resolve().parent / "data" / "knowledge_seed.json"
+
+def _load_env():
+    """Подхватываем .env.production / .env ДО импорта db (он читает NEIROMASTER_DB_DSN
+    на импорте). systemd подставляет их юниту через EnvironmentFile, но при ручном
+    запуске из шелла переменных нет — иначе падаем на дефолтном пароле Postgres."""
+    for name in (".env.production", ".env"):
+        path = BASE / name
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)   # не перекрываем уже заданное окружение
+
+
+_load_env()
+
+import db          # noqa: E402  (после _load_env — DSN читается на импорте)
+import folders     # noqa: E402
+import stages      # noqa: E402
+
+SEED_PATH = BASE / "data" / "knowledge_seed.json"
 
 
 def _state():
