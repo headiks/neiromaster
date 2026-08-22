@@ -45,7 +45,7 @@ import folders
 from config import (
     DOCS_DIR, CONVERTED_DIR, CACHE_DIR, REGISTRY_PATH,
     SUPPORTED_EXT, MAX_UPLOAD_BYTES,
-    QDRANT_HOST, QDRANT_PORT, EMBED_DIM, get_embedding,
+    QDRANT_HOST, QDRANT_PORT, EMBED_DIM, get_embedding, FileGuard,
 )
 
 # Символическое перекрытие между соседними чанками (ТЗ §12): в текст для эмбеддинга
@@ -65,7 +65,10 @@ client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 converter = DocumentConverter()
 chunker = HybridChunker(max_tokens=MAX_TOKENS, merge_peers=MERGE_PEERS)
 
-_registry_lock = threading.Lock()
+# Межпроцессная блокировка реестра: read-modify-write registry.json безопасен и при
+# нескольких uvicorn-воркерах (см. config.FileGuard). Раньше был обычный threading.Lock,
+# который между процессами не действует — параллельные записи теряли обновления.
+_registry_lock = FileGuard(REGISTRY_PATH.with_suffix(".lock"))
 
 
 def _log(step, msg):
@@ -364,7 +367,7 @@ def index_document(filepath: Path) -> dict:
 def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: int = 6) -> list:
     """
     Поиск чанков с опциональным сужением до конкретных тем. Тем же приёмом, что и
-    в диалоге (test_cascade.search), пользуется конструктор плана: сначала выбираем
+    в диалоге (rag.search), пользуется конструктор плана: сначала выбираем
     темы, потом ищем только внутри них.
     Возвращает [{"text", "source", "topic", "page", "score"}].
     """

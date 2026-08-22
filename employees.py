@@ -79,7 +79,9 @@ def build_employee_schedule(employee: dict) -> dict:
         messages.append({
             **item,
             "content": content,
-            "folders_used": source.get("folders_used", []),
+            # В расписании планировщика поле называется topics_used (см. planner.build_schedule);
+            # отдаём его под ключом folders_used, который читает админский обзор расписания.
+            "folders_used": source.get("topics_used", []),
             "sources": source.get("sources", []),
             "actions": source.get("actions", []),
             "status": source.get("status", "pending"),

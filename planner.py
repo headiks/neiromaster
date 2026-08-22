@@ -568,7 +568,7 @@ def pick_topics(stage: dict, substage: dict, topic_list: list) -> list:
     Фолбэк — все включённые папки (поиск без сужения). topic_list — список папок
     (folders.list_folders): slug, name, description, criteria.
     """
-    from test_cascade import small_llm, parse_json_response
+    from rag import small_llm, parse_json_response
 
     available = list(topic_list or [])
     if not available:
@@ -601,7 +601,7 @@ def pick_topics(stage: dict, substage: dict, topic_list: list) -> list:
 def generate_substage_message(stage: dict, substage: dict, topic_list: list) -> dict:
     """Генерирует текст одного подэтапа. Ошибки не поднимает — возвращает status=error."""
     import indexing
-    from test_cascade import big_llm
+    from rag import big_llm
 
     result = {"topics_used": [], "sources": [], "status": "generated", "error": None,
               "content": {"format": "markdown", "text": ""}}

@@ -2,7 +2,7 @@ import time
 import json
 import uuid
 import threading
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -13,7 +13,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 from pydantic import BaseModel
 import uvicorn
 
-from test_cascade import handle_question, HISTORY_WINDOW
+from rag import handle_question, HISTORY_WINDOW
+from config import MAX_UPLOAD_BYTES
 import db
 import indexing
 import planner
@@ -24,12 +25,29 @@ import folders
 import stages
 import classify
 import employees as adaptation
+import mailing
+import sender
 from indexing import DOCS_DIR
 
 
 def _bg(fn, *args):
     """Фоновая задача (реанализ базы и т.п. — может быть долгой из-за LLM)."""
     threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def _sync_mailing(user_id: str):
+    """Этап 7: держим строку персонального расписания рассылки сотрудника в актуальном
+    состоянии после изменения его плана / даты выхода / профиля / роли. Для не-сотрудников
+    (админ, владелец) строки рассылки нет — убираем. Сбой рассылки не должен ронять
+    основную операцию с пользователем, поэтому всё под защитой."""
+    try:
+        user = users.get_user(user_id)
+        if user and user.get("role") == users.ROLE_EMPLOYEE:
+            mailing.refresh_employee(user_id)
+        else:
+            mailing.remove(user_id)
+    except Exception as e:
+        print(f"[MAILING] не удалось обновить расписание рассылки {user_id}: {e}")
 
 
 def _current_stage_ids(user: dict) -> list:
@@ -87,6 +105,22 @@ async def lifespan(app: FastAPI):
         print(f"  Дубль записан в {users.INITIAL_CREDENTIALS_PATH}")
         print("  При первом входе система попросит задать свои логин и пароль.")
         print("=" * 70)
+
+    # Этап 7 — персональные расписания рассылки: создаём таблицу employee_mailing и
+    # пересчитываем «следующую отправку» по всем сотрудникам из их планов и дат выхода.
+    try:
+        mailing.init()
+        synced = mailing.refresh_all()
+        print(f"Расписания рассылки (этап 7): пересчитано сотрудников {synced}.")
+    except Exception as e:
+        print(f"Предупреждение: расписания рассылки (этап 7) не инициализированы: {e}")
+
+    # Этап 8 — служба рассылки: исходящий ящик + фоновый планировщик авто-отправки.
+    try:
+        sender.init()
+        sender.start_scheduler()
+    except Exception as e:
+        print(f"Предупреждение: служба рассылки (этап 8) не запущена: {e}")
     yield
 
 
@@ -120,10 +154,21 @@ class QuestionResponse(BaseModel):
 # Живёт только в памяти текущего процесса: подходит для одного uvicorn-воркера;
 # для многопроцессного/многосерверного деплоя нужно вынести в Redis или аналог.
 HISTORY_MAX_STORE = 20  # сколько реплик хранить на сессию (окно анализа контекста меньше — HISTORY_WINDOW)
+# Верхняя граница числа сессий в памяти. Без неё словарь рос бы бесконечно (каждая
+# новая вкладка = новый session_id), медленно утекая по памяти. При переполнении
+# вытесняется самая давно не активная сессия (LRU) — её история просто пересоздастся.
+MAX_SESSIONS = 5000
 
 _history_lock = threading.Lock()
-_conversation_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=HISTORY_MAX_STORE))
+_conversation_history: "OrderedDict[str, deque]" = OrderedDict()
 _session_owner: dict[str, str] = {}   # session_id -> user_id первого владельца сессии
+
+
+def _evict_sessions_locked():
+    """Держим не больше MAX_SESSIONS сессий. Вызывать под _history_lock."""
+    while len(_conversation_history) > MAX_SESSIONS:
+        old_sid, _ = _conversation_history.popitem(last=False)
+        _session_owner.pop(old_sid, None)
 
 
 def get_recent_history(session_id: str, n: int = HISTORY_WINDOW) -> list:
@@ -134,9 +179,16 @@ def get_recent_history(session_id: str, n: int = HISTORY_WINDOW) -> list:
 
 def append_history(session_id: str, question: str, answer: str | None, owner_id: str | None = None):
     with _history_lock:
-        _conversation_history[session_id].append({"question": question, "answer": answer})
+        dq = _conversation_history.get(session_id)
+        if dq is None:
+            dq = deque(maxlen=HISTORY_MAX_STORE)
+            _conversation_history[session_id] = dq
+        else:
+            _conversation_history.move_to_end(session_id)   # активная сессия — в конец очереди LRU
+        dq.append({"question": question, "answer": answer})
         if owner_id and session_id not in _session_owner:
             _session_owner[session_id] = owner_id
+        _evict_sessions_locked()
 
 
 # ---------- Доступ ----------
@@ -282,6 +334,7 @@ async def api_register(req: RegisterRequest):
     try:
         user = users.register_employee(req.username, req.password, req.full_name,
                                        position=req.position or "", contact=req.contact or "")
+        _sync_mailing(user["id"])   # этап 7: сразу заводим строку расписания рассылки
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {
@@ -350,6 +403,13 @@ async def api_my_questions(user: dict = Depends(require_setup_done)):
     return {"questions": questions.list_for_user(user["id"])}
 
 
+@app.get("/api/my/inbox", dependencies=logged_in)
+def api_my_inbox(user: dict = Depends(require_setup_done)):
+    """Этап 8: входящие сообщения плана адаптации, которые служба рассылки уже отправила
+    этому сотруднику по расписанию. Это то, что забирает клиент (этап 9)."""
+    return {"inbox": sender.inbox(user["id"])}
+
+
 # ---------- RAG-вопросы ----------
 ESCALATE_REPLY = ("⚠️ Вопрос требует внимания специалиста — передал его ответственному. "
                   "Ответ придёт в личный кабинет.")
@@ -376,8 +436,12 @@ def _route_to_human(result: dict, user: dict) -> dict:
     return result
 
 
+# Синхронный def (не async): handle_question ходит в Ollama/Qdrant синхронными
+# requests на секунды-минуты. В async-обработчике это заблокировало бы весь event loop
+# uvicorn-воркера — «зависли» бы все параллельные запросы. Обычный def FastAPI выполняет
+# в threadpool, поэтому воркер продолжает обслуживать других пользователей.
 @app.post("/ask", response_model=QuestionResponse, dependencies=logged_in)
-async def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
+def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
     start = time.time()
     question = req.question.strip()
     if not question:
@@ -396,6 +460,9 @@ async def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
         append_history(session_id, question, result.get("answer"), owner_id=user["id"])
         return QuestionResponse(**result)
     except Exception as e:
+        # Внутреннюю причину — только в лог сервера, наружу общее сообщение:
+        # str(e) может раскрывать детали инфраструктуры (адреса, схемы, стек).
+        print(f"[ASK] ошибка обработки вопроса (session={session_id}): {e!r}")
         return QuestionResponse(
             question=question,
             session_id=session_id,
@@ -405,7 +472,7 @@ async def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
             top_fragments=[],
             answer=None,
             elapsed_time=time.time() - start,
-            error=str(e)
+            error="Не удалось обработать вопрос. Попробуйте ещё раз позже."
         )
 
 
@@ -438,7 +505,13 @@ async def upload_document(file: UploadFile = File(...)):
     Ответ приходит сразу (202) с идентификатором задачи; прогресс —
     через GET /documents/jobs/{job_id}. Тяжёлый разбор PDF не держит запрос.
     """
-    content = await file.read()
+    # Читаем не больше лимита +1 байт: иначе гигабайтный файл целиком буферизуется в
+    # RAM ещё до проверки размера (потенциальный OOM). Лишний байт нужен, чтобы отличить
+    # «ровно лимит» от «больше лимита».
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"Файл превышает лимит {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ")
     try:
         filepath = indexing.save_uploaded_file(file.filename, content)
     except ValueError as e:
@@ -499,7 +572,7 @@ async def get_folders():
 
 
 @app.post("/folders", dependencies=admin_only)
-async def create_folder(req: FolderRequest):
+def create_folder(req: FolderRequest):
     try:
         folder = folders.create_folder(req.name, req.description or "", req.criteria, req.stage_ids)
     except ValueError as e:
@@ -512,7 +585,7 @@ async def create_folder(req: FolderRequest):
 
 
 @app.put("/folders/{folder_id}", dependencies=admin_only)
-async def update_folder(folder_id: str, req: FolderRequest):
+def update_folder(folder_id: str, req: FolderRequest):
     existing = folders.get_folder(folder_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Папка не найдена")
@@ -529,7 +602,7 @@ async def update_folder(folder_id: str, req: FolderRequest):
 
 
 @app.delete("/folders/{folder_id}", dependencies=admin_only)
-async def delete_folder(folder_id: str):
+def delete_folder(folder_id: str):
     """Удаляет только логическую категорию — документы остаются в общей базе знаний."""
     folder = folders.get_folder(folder_id)
     if folder is None:
@@ -546,7 +619,7 @@ class ClarifyRequest(BaseModel):
 
 
 @app.post("/documents/reanalyze", dependencies=admin_only)
-async def reanalyze_documents():
+def reanalyze_documents():
     """Полный повторный анализ всей базы под текущую структуру папок (фоново)."""
     classify.sync_folder_vectors()
     _bg(indexing.reanalyze_all)
@@ -554,7 +627,7 @@ async def reanalyze_documents():
 
 
 @app.post("/documents/{filename}/reanalyze", dependencies=admin_only)
-async def reanalyze_one(filename: str):
+def reanalyze_one(filename: str):
     return indexing.reanalyze_document(filename)
 
 
@@ -674,6 +747,7 @@ async def update_plan(plan_id: str, req: PlanRequest):
     payload["created_at"] = existing.get("created_at")
     plan = planner.normalize_plan(payload, plan_id=plan_id)
     planner.save_plan(plan)
+    _bg(mailing.refresh_all)   # этап 7: даты/состав плана изменились -> пересчёт рассылки сотрудников
     return plan
 
 
@@ -681,6 +755,7 @@ async def update_plan(plan_id: str, req: PlanRequest):
 async def remove_plan(plan_id: str):
     if not planner.delete_plan(plan_id):
         raise HTTPException(status_code=404, detail="План не найден")
+    _bg(mailing.refresh_all)   # этап 7: у сотрудников с этим планом рассылка станет plan_missing
     return {"plan_id": plan_id, "deleted": True}
 
 
@@ -724,7 +799,7 @@ async def get_schedule(plan_id: str):
 
 
 @app.post("/plans/{plan_id}/messages/{message_id}/regenerate", dependencies=admin_only)
-async def regenerate_message(plan_id: str, message_id: str):
+def regenerate_message(plan_id: str, message_id: str):
     """Перегенерация одного подэтапа — без прогона всего плана."""
     plan = planner.load_plan(plan_id)
     if plan is None:
@@ -824,6 +899,7 @@ async def create_user(req: UserRequest, actor: dict = Depends(require_admin)):
                                  must_change_credentials=bool(req.password))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _sync_mailing(user["id"])   # этап 7: план/дата выхода могли быть заданы сразу
     return users.public_view(user)
 
 
@@ -840,6 +916,7 @@ async def update_user(user_id: str, req: UserRequest, actor: dict = Depends(requ
     """Правка профиля и назначение плана адаптации с датой выхода."""
     _target_user(user_id, actor)
     user = users.update_profile(user_id, req.model_dump())
+    _sync_mailing(user_id)   # этап 7: могли поменять план или дату выхода
     return users.public_view(user)
 
 
@@ -855,6 +932,7 @@ async def remove_user(user_id: str, actor: dict = Depends(require_owner)):
     if not deleted:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     auth.drop_user_sessions(user_id)
+    _sync_mailing(user_id)   # этап 7: пользователя уже нет -> строка рассылки убирается
     return {"user_id": user_id, "deleted": True}
 
 
@@ -869,6 +947,7 @@ async def change_user_role(user_id: str, req: RoleRequest, actor: dict = Depends
         raise HTTPException(status_code=400, detail=str(e))
     # Права изменились — пусть перезайдёт с актуальной ролью
     auth.drop_user_sessions(user_id)
+    _sync_mailing(user_id)   # этап 7: сотрудник<->админ — строка рассылки заводится/убирается
     return users.public_view(user)
 
 
@@ -937,6 +1016,53 @@ async def get_user_schedule(user_id: str):
         return adaptation.build_employee_schedule(user)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------- Этап 7: персональные расписания рассылки ----------
+# Сервер материализует по каждому сотруднику «следующую дату и время рассылки» в таблице
+# employee_mailing (см. mailing.py). Роуты только читают/пересчитывают её; сами отправки —
+# это этап 8 («служба рассылки»), который берёт очередь из GET /mailing/due.
+@app.get("/mailing", dependencies=admin_only)
+def get_mailing():
+    """Обзор рассылки по всем сотрудникам: следующее сообщение, когда и сколько осталось."""
+    return {"mailing": mailing.list_all()}
+
+
+@app.get("/mailing/due", dependencies=admin_only)
+def get_mailing_due(before: str | None = None):
+    """Очередь «пора отправлять»: время следующего сообщения уже наступило (по умолчанию —
+    на текущий момент). Это вход для службы рассылки (этап 8). before — 'YYYY-MM-DDTHH:MM'."""
+    return {"due": mailing.due(before)}
+
+
+@app.post("/mailing/refresh", dependencies=admin_only)
+def refresh_mailing():
+    """Принудительный полный пересчёт расписаний рассылки из планов и дат выхода."""
+    return {"refreshed": mailing.refresh_all()}
+
+
+@app.post("/mailing/run", dependencies=admin_only)
+def run_mailing():
+    """Этап 8: разово прогнать службу рассылки прямо сейчас — доставить все наступившие
+    и ещё не отправленные сообщения. Тот же проход, что делает фоновый планировщик."""
+    return {"sent": sender.deliver_due()}
+
+
+@app.get("/users/{user_id}/inbox", dependencies=admin_only)
+def get_user_inbox(user_id: str):
+    """Этап 8: что уже отправлено сотруднику (история исходящего ящика) — для контроля админом."""
+    if users.get_user(user_id) is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return {"inbox": sender.inbox(user_id)}
+
+
+@app.get("/users/{user_id}/mailing", dependencies=admin_only)
+def get_user_mailing(user_id: str):
+    """Строка рассылки одного сотрудника (следующее сообщение и его время)."""
+    row = mailing.get(user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Расписание рассылки для сотрудника не рассчитано")
+    return row
 
 
 EMPLOYEE_EXPORTS = {"schedule.json", "schedule.md"}

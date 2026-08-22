@@ -8,7 +8,7 @@ updated: 2026-08-13
 
 ## Поток данных — вопрос сотрудника
 1. `POST /ask` в `app.py` (нужна сессия) — session_id связывает вопросы в диалог
-2. `test_cascade.handle_question()`: анализ истории → классификация route/risk
+2. `rag.handle_question()`: анализ истории → классификация route/risk
 3. Если `rag` → `topics.route_question()` выбирает 1-2 темы вектором
 4. `search()` в Qdrant с фильтром по темам → `rerank()` → отбор по порогу
 5. `generate_answer()` (qwen3:14b) пишет ответ строго по top-фрагментам
@@ -30,7 +30,7 @@ updated: 2026-08-13
 
 ## Ключевые связи между модулями
 - `app.py` — единственный HTTP-слой, тянет все модули
-- `test_cascade.py` (RAG) зависит от `topics.py` и `config.get_embedding`
+- `rag.py` (RAG) зависит от `topics.py` и `config.get_embedding`
 - `topics.py` — и классификация документов, и маршрутизация вопросов (одна коллекция тем)
 - `indexing.py` использует `topics.classify_document` при загрузке
 - `employees.py` зависит от `planner` (расписание считается из плана)
