@@ -32,10 +32,10 @@ def _stub(name: str):
     return sys.modules[name]
 
 
-def _load_test_cascade():
-    _stub("classify")                     # test_cascade делает `import classify`, `import folders`
+def _load_rag():
+    _stub("classify")                     # rag.py делает `import classify`, `import folders`
     _stub("folders")
-    return importlib.import_module("test_cascade")
+    return importlib.import_module("rag")
 
 
 def _load_auth():
@@ -72,7 +72,7 @@ def test_plan_id_traversal_to_root():
 #    о плохом самочувствии, которые должны эскалироваться человеку.
 # ==========================================================================
 def test_greeting_prefilter_does_not_swallow_real_messages():
-    tc = _load_test_cascade()
+    tc = _load_rag()
     distress_or_rag = [
         "мне плохо нет сил",         # содержит «нет» -> должно эскалироваться, а не general
         "проблема с интернетом",     # содержит «нет» -> обычный вопрос

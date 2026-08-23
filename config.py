@@ -1,11 +1,54 @@
 """
 Общие пути и низкоуровневые константы. Никакой бизнес-логики — только то,
-что нужно и indexing.py, и topics.py, и test_cascade.py одновременно.
+что нужно и indexing.py, и topics.py, и rag.py одновременно.
 Вынесено отдельно, чтобы indexing.py <-> topics.py не импортировали друг друга по кругу.
 """
 import os
+import threading
 from pathlib import Path
 import requests
+
+try:
+    import fcntl   # POSIX (Linux/macOS). На Windows недоступен — см. FileGuard.
+except ImportError:
+    fcntl = None
+
+
+class FileGuard:
+    """Блокировка безопасного read-modify-write для файловых хранилищ (реестр
+    документов, очередь вопросов). threading.Lock синхронизирует потоки одного
+    процесса, flock — параллельные uvicorn-воркеры (`--workers N`): без него две
+    одновременные записи в один JSON затирают друг друга (потерянное обновление).
+    fcntl есть только на POSIX; на Windows тихо деградируем до внутрипроцессной
+    блокировки (там multi-worker uvicorn и не применяется)."""
+
+    def __init__(self, lock_path):
+        self._tlock = threading.Lock()
+        self._path = str(lock_path)
+        self._fh = None
+
+    def __enter__(self):
+        self._tlock.acquire()
+        if fcntl is not None:
+            try:
+                self._fh = open(self._path, "w")
+                fcntl.flock(self._fh, fcntl.LOCK_EX)
+            except OSError:
+                if self._fh is not None:
+                    self._fh.close()
+                self._fh = None
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._fh is not None:
+                try:
+                    fcntl.flock(self._fh, fcntl.LOCK_UN)
+                finally:
+                    self._fh.close()
+                    self._fh = None
+        finally:
+            self._tlock.release()
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"

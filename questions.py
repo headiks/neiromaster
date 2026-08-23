@@ -6,7 +6,7 @@
   - маршрут «rag», но ответа нет: в базе не нашлось фрагментов или не пройден
     порог уверенности (confidence gate).
 
-Детектирует эти случаи test_cascade.handle_question (route + risk_flag), а маршрутизацию
+Детектирует эти случаи rag.handle_question (route + risk_flag), а маршрутизацию
 человеку выполняет /ask в app.py: вопрос без ответа не теряется, а встаёт в очередь
 администратору. Тот отвечает (обсудив со специалистом при необходимости), и ответ
 сохраняется — сотрудник видит его в личном кабинете.
@@ -18,9 +18,10 @@ import os
 import json
 import time
 import uuid
-import threading
 from pathlib import Path
 from typing import Optional
+
+from config import FileGuard
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -32,7 +33,10 @@ REASON_NO_ANSWER = "no_answer"  # в регламентах ответа не н
 STATUS_OPEN = "open"
 STATUS_RESOLVED = "resolved"
 
-_lock = threading.Lock()
+# Межпроцессная блокировка очереди вопросов: read-modify-write pending_questions.json
+# безопасен и при нескольких uvicorn-воркерах (см. config.FileGuard). Прежний
+# threading.Lock защищал только потоки одного процесса.
+_lock = FileGuard(QUESTIONS_PATH.with_suffix(".lock"))
 
 
 def _now() -> str:

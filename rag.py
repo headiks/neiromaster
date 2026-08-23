@@ -1,3 +1,4 @@
+import os
 import requests
 import json
 import re
@@ -5,19 +6,21 @@ import time
 
 import classify
 import folders
+from config import OLLAMA_URL as OLLAMA, QDRANT_HOST, QDRANT_PORT, get_embedding as _get_embedding
 
 # ---------- Конфигурация ----------
-OLLAMA = "http://localhost:8080"
-QDRANT = "http://localhost:6333"
+QDRANT = f"http://{QDRANT_HOST}:{QDRANT_PORT}"   # хост/порт Qdrant — из config (единый источник)
 COLLECTION = "reglaments"
 SMALL_MODEL = "qwen2.5:3b"      # для скорости, но можно поставить 7b для точности
 BIG_MODEL = "qwen3:14b"
 CONFIDENCE_THRESHOLD = 0.55
 MAX_CONTEXT_FRAGMENTS = 3
 HISTORY_WINDOW = 3   # сколько последних вопросов пользователя учитывать при разрешении контекста
-DEBUG = True
+# Подробный лог пайплайна: промпты, сырые ответы моделей, тексты вопросов. По умолчанию
+# ВЫКЛ — в проде он шумный и может писать в логи чувствительные данные (содержимое
+# регламентов, вопросы сотрудников). Включается переменной NEIROMASTER_DEBUG=1.
+DEBUG = os.environ.get("NEIROMASTER_DEBUG", "").lower() in ("1", "true", "yes")
 
-EMBED_TIMEOUT = 120   # первый эмбеддинг грузит bge-m3 в память (на CPU долго) — 30 с не хватало
 SMALL_LLM_TIMEOUT = 60
 BIG_LLM_TIMEOUT = 90
 QDRANT_TIMEOUT = 15
@@ -70,16 +73,18 @@ def has_rag_keywords(text):
 
 # ---------- Вспомогательные функции ----------
 def log(step, msg, data=None):
+    if not DEBUG:
+        return
     print(f"[{step}] {msg}")
     if data is not None:
         print(f"    {data}")
 
 def embed(text):
+    # Единая точка эмбеддинга — config.get_embedding (та же модель bge-m3 и таймаут,
+    # что и у индексации), чтобы не держать вторую копию модели/таймаута/эндпоинта.
     log("EMBED", f"Запрос эмбеддинга для текста: {text[:50]}...")
     start = time.time()
-    r = requests.post(f"{OLLAMA}/api/embed", json={"model": "bge-m3", "input": text}, timeout=EMBED_TIMEOUT)
-    r.raise_for_status()
-    result = r.json()["embeddings"][0]
+    result = _get_embedding(text)
     log("EMBED", f"Эмбеддинг получен за {time.time()-start:.3f} сек, размерность {len(result)}")
     return result
 
