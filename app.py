@@ -584,6 +584,12 @@ async def get_folders():
     return {"folders": result}
 
 
+@app.get("/folders/{slug}/chunks", dependencies=admin_only)
+async def get_folder_chunks(slug: str):
+    """Чанки внутри смысловой папки — просмотр содержимого папки (текст + из какого документа)."""
+    return indexing.get_folder_chunks(slug)
+
+
 @app.post("/folders", dependencies=admin_only)
 def create_folder(req: FolderRequest):
     try:

@@ -450,6 +450,41 @@ def get_document_chunks(filename: str) -> Optional[dict]:
     return {"filename": filename, "chunks": chunks, "count": len(chunks)}
 
 
+def get_folder_chunks(slug: str, limit: int = 1000) -> dict:
+    """Чанки, отнесённые к смысловой папке (payload.folders содержит slug) — для просмотра
+    содержимого папки в админке. Векторы не тянем (для просмотра не нужны, легче ответ).
+    Отсортированы по документу и порядку чанка. limit — верхний предел (ponytail: для
+    браузинга хватает; при очень больших папках покажем первые N и count=предел)."""
+    points = []
+    offset = None
+    while len(points) < limit:
+        batch, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(must=[FieldCondition(key="folders", match=MatchValue(value=slug))]),
+            limit=min(256, limit - len(points)),
+            with_payload=True, with_vectors=False, offset=offset,
+        )
+        points.extend(batch)
+        if offset is None:
+            break
+
+    chunks = []
+    for p in points:
+        payload = p.payload or {}
+        chunks.append({
+            "id": str(p.id),
+            "source": payload.get("source"),
+            "chunk_index": payload.get("chunk_index"),
+            "section": payload.get("section"),
+            "page": payload.get("page"),
+            "length": payload.get("length"),
+            "folders": payload.get("folders") or [],
+            "text": payload.get("text", ""),
+        })
+    chunks.sort(key=lambda c: ((c["source"] or ""), c["chunk_index"] is None, c["chunk_index"] or 0))
+    return {"slug": slug, "chunks": chunks, "count": len(chunks), "truncated": len(points) >= limit}
+
+
 def delete_document_vectors(filename: str):
     """Удаляет из Qdrant все точки данного документа (по полю source)."""
     client.delete(
