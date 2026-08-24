@@ -312,6 +312,19 @@ async def admin_page(request: Request):
     return HTMLResponse(_read_static("admin.html"))
 
 
+@app.get("/tester", response_class=HTMLResponse)
+async def tester_page(request: Request):
+    """Служебная инспекция БД: записи рассылки (employee_mailing) и планы с сообщениями."""
+    user = auth.get_session_user(request.cookies.get(auth.COOKIE_NAME))
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.get("must_change_credentials"):
+        return RedirectResponse(url="/setup", status_code=303)
+    if not users.is_admin(user):
+        return RedirectResponse(url="/", status_code=303)
+    return HTMLResponse(_read_static("tester.html"))
+
+
 # ---------- Вход, регистрация, свой профиль ----------
 @app.post("/api/login")
 async def api_login(req: LoginRequest, request: Request, response: Response):

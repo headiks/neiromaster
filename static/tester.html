@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tester · НейроМастер</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <style>
+        /* Служебная страница инспекции БД — минимальная своя вёрстка поверх app.css */
+        .tst-wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+        .tst-sec { margin: 24px 0; }
+        .tst-sec h2 { display: flex; align-items: center; gap: 8px; }
+        table.tst { width: 100%; border-collapse: collapse; font-size: 14px; }
+        table.tst th, table.tst td { border: 1px solid var(--border, #d0d5dd); padding: 6px 8px; text-align: left; vertical-align: top; }
+        table.tst th { background: var(--surface-2, #f1f3f5); font-weight: 600; }
+        table.tst tr.clickable { cursor: pointer; }
+        table.tst tr.clickable:hover { background: var(--surface-2, #f6f8fa); }
+        .muted { color: var(--muted, #667085); }
+        .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+        .msg-text { white-space: pre-wrap; background: var(--surface-2, #f6f8fa); border: 1px solid var(--border, #d0d5dd); border-radius: 6px; padding: 8px; margin: 4px 0; font-size: 13px; }
+        .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--surface-2, #eef1f4); }
+        .plan-card { border: 1px solid var(--border, #d0d5dd); border-radius: 8px; padding: 10px 12px; margin: 8px 0; cursor: pointer; }
+        .plan-card:hover { background: var(--surface-2, #f6f8fa); }
+        .plan-detail { margin: 6px 0 14px 0; }
+        button.tst-btn { font-size: 12px; padding: 2px 8px; }
+        .err { color: #b42318; }
+    </style>
+</head>
+<body>
+<div class="tst-wrap">
+    <header style="display:flex;justify-content:space-between;align-items:center;">
+        <h1>Tester — инспекция базы данных</h1>
+        <span class="muted" id="whoami"></span>
+    </header>
+    <p class="muted">Служебная страница: показывает сырые записи БД рассылки и планов. Только для админов.</p>
+
+    <section class="tst-sec">
+        <h2>📨 Рассылка по сотрудникам <span class="muted">(таблица employee_mailing)</span>
+            <button class="ghost-btn tst-btn" onclick="loadMailing()">обновить</button></h2>
+        <div id="mailing-status" class="muted">загрузка…</div>
+        <table class="tst" id="mailing-table" style="display:none">
+            <thead><tr>
+                <th>Сотрудник</th><th>План</th><th>Дата выхода</th><th>Следующая отправка</th>
+                <th>№ сообщения</th><th>Подэтап</th><th>Осталось/Всего</th><th>Статус</th><th></th>
+            </tr></thead>
+            <tbody id="mailing-body"></tbody>
+        </table>
+    </section>
+
+    <section class="tst-sec">
+        <h2>📋 Планы адаптации <span class="muted">(база планов)</span>
+            <button class="ghost-btn tst-btn" onclick="loadPlans()">обновить</button></h2>
+        <div id="plans-status" class="muted">загрузка…</div>
+        <div id="plans-list"></div>
+    </section>
+</div>
+
+<script>
+    function esc(s) { const d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+    function api(url, opt) {
+        return fetch(url, opt).then(res => {
+            if (res.status === 401) { window.location.href = '/login'; throw new Error('Сессия истекла'); }
+            return res;
+        });
+    }
+    function apiJson(url) { return api(url).then(res => res.json().then(data => ({ ok: res.ok, data }))); }
+
+    api('/api/me').then(r => r.json()).then(me => {
+        document.getElementById('whoami').textContent = (me.full_name || me.username || '') + ' · ' + (me.role || '');
+    }).catch(() => {});
+
+    // ---------- Секция 1: employee_mailing ----------
+    const scheduleCache = {};   // user_id -> {message_id: content.text}
+
+    function loadMailing() {
+        const status = document.getElementById('mailing-status');
+        const table = document.getElementById('mailing-table');
+        status.textContent = 'загрузка…'; status.classList.remove('err'); table.style.display = 'none';
+        apiJson('/mailing').then(({ ok, data }) => {
+            if (!ok) { status.textContent = 'ошибка: ' + (data.detail || 'не удалось загрузить'); status.classList.add('err'); return; }
+            const rows = data.mailing || [];
+            if (!rows.length) { status.textContent = 'записей нет'; return; }
+            const body = document.getElementById('mailing-body');
+            body.innerHTML = '';
+            rows.forEach(r => {
+                const tr = document.createElement('tr');
+                tr.innerHTML =
+                    `<td>${esc(r.full_name) || '<span class="muted">—</span>'}</td>` +
+                    `<td>${esc(r.plan_title || r.plan_id) || '<span class="muted">—</span>'}</td>` +
+                    `<td>${esc(r.start_date) || '<span class="muted">—</span>'}</td>` +
+                    `<td class="mono">${esc(r.next_send_at) || '<span class="muted">—</span>'}</td>` +
+                    `<td class="mono">${esc(r.next_message_id) || '<span class="muted">—</span>'}</td>` +
+                    `<td>${esc(r.next_title) || '<span class="muted">—</span>'}</td>` +
+                    `<td>${r.remaining}/${r.total_messages}</td>` +
+                    `<td><span class="pill">${esc(r.status)}</span></td>` +
+                    `<td>${r.next_message_id ? '<button class="ghost-btn tst-btn">текст</button>' : ''}</td>`;
+                const detail = document.createElement('tr');
+                detail.style.display = 'none';
+                detail.innerHTML = `<td colspan="9"><div class="msg-detail muted">…</div></td>`;
+                const btn = tr.querySelector('button');
+                if (btn) btn.addEventListener('click', () => toggleMailingText(r, detail));
+                body.appendChild(tr); body.appendChild(detail);
+            });
+            status.textContent = rows.length + ' записей'; table.style.display = '';
+        });
+    }
+
+    function toggleMailingText(row, detailTr) {
+        if (detailTr.style.display !== 'none') { detailTr.style.display = 'none'; return; }
+        detailTr.style.display = '';
+        const box = detailTr.querySelector('.msg-detail');
+        box.textContent = 'загрузка текста…';
+        // Текст следующего сообщения берём из персонального расписания сотрудника.
+        const uid = row.user_id;
+        const render = (map) => {
+            const text = map[row.next_message_id];
+            box.innerHTML = text
+                ? `<div class="mono muted">${esc(row.next_message_id)} · отправка ${esc(row.next_send_at)}</div><div class="msg-text">${esc(text)}</div>`
+                : '<span class="err">текст сообщения не найден (возможно, не сгенерирован)</span>';
+        };
+        if (scheduleCache[uid]) { render(scheduleCache[uid]); return; }
+        apiJson(`/users/${encodeURIComponent(uid)}/schedule`).then(({ ok, data }) => {
+            if (!ok) { box.innerHTML = '<span class="err">не удалось получить расписание: ' + esc(data.detail || '') + '</span>'; return; }
+            const map = {};
+            (data.messages || []).forEach(m => { map[m.message_id] = (m.content || {}).text || ''; });
+            scheduleCache[uid] = map; render(map);
+        });
+    }
+
+    // ---------- Секция 2: планы ----------
+    function loadPlans() {
+        const status = document.getElementById('plans-status');
+        const list = document.getElementById('plans-list');
+        status.textContent = 'загрузка…'; status.classList.remove('err'); list.innerHTML = '';
+        apiJson('/plans').then(({ ok, data }) => {
+            if (!ok) { status.textContent = 'ошибка: ' + (data.detail || 'не удалось загрузить'); status.classList.add('err'); return; }
+            const plans = data.plans || [];
+            if (!plans.length) { status.textContent = 'планов нет'; return; }
+            status.textContent = plans.length + ' планов';
+            plans.forEach(p => {
+                const card = document.createElement('div');
+                card.className = 'plan-card';
+                card.innerHTML =
+                    `<strong>${esc(p.title) || '<span class="muted">без названия</span>'}</strong> ` +
+                    `<span class="muted">${esc(p.role) || ''}</span><br>` +
+                    `<span class="muted mono">${esc(p.plan_id)}</span> · этапов: ${p.stages} · подэтапов: ${p.substages} · ` +
+                    (p.generated ? '<span class="pill">сгенерирован</span>' : '<span class="pill">не сгенерирован</span>');
+                const detail = document.createElement('div');
+                detail.className = 'plan-detail'; detail.style.display = 'none';
+                card.addEventListener('click', () => togglePlan(p, detail, card));
+                list.appendChild(card); list.appendChild(detail);
+            });
+        });
+    }
+
+    function togglePlan(plan, detail, card) {
+        if (detail.style.display !== 'none') { detail.style.display = 'none'; return; }
+        detail.style.display = ''; detail.textContent = 'загрузка…';
+        // Сгенерированный план -> расписание с готовым текстом; иначе -> структура-превью без текста.
+        const url = plan.generated ? `/plans/${encodeURIComponent(plan.plan_id)}/schedule`
+                                   : `/plans/${encodeURIComponent(plan.plan_id)}`;
+        apiJson(url).then(({ ok, data }) => {
+            if (!ok) { detail.innerHTML = '<span class="err">' + esc(data.detail || 'не удалось загрузить') + '</span>'; return; }
+            const messages = plan.generated ? (data.messages || []) : (data.schedule_preview || []);
+            renderPlanMessages(detail, messages, plan.generated);
+        });
+    }
+
+    function renderPlanMessages(container, messages, generated) {
+        if (!messages.length) { container.innerHTML = '<span class="muted">сообщений нет</span>'; return; }
+        let html = '<table class="tst"><thead><tr><th>№</th><th>Этап</th><th>Подэтап</th><th>Когда</th><th>Текст</th></tr></thead><tbody>';
+        messages.forEach(m => {
+            const st = m.stage || {}, sub = m.substage || {}, sc = m.schedule || {};
+            const when = sc.send_at ? `<span class="mono">${esc(sc.send_at)}</span>`
+                                    : `<span class="muted">день ${esc(sc.stage_day)} ${esc(sc.time || '')} (+${esc(sc.offset_days)}д)</span>`;
+            let text;
+            if (generated) {
+                const t = (m.content || {}).text || '';
+                text = t ? `<div class="msg-text">${esc(t)}</div>` : '<span class="muted">пусто</span>';
+            } else {
+                text = `<span class="muted">${esc(sub.brief) || 'не сгенерирован'}</span>`;
+            }
+            html += `<tr><td class="mono">${esc(st.order)}.${esc(sub.order)}</td>` +
+                    `<td>${esc(st.title)}</td><td>${esc(sub.title)}</td><td>${when}</td><td>${text}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }
+
+    loadMailing();
+    loadPlans();
+</script>
+</body>
+</html>
