@@ -123,6 +123,7 @@
         .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 13px; white-space: nowrap; }
         .status-badge.uploaded { background: #e2e8f0; color: #475569; }
         .status-badge.processing { background: #fde68a; color: #78350f; }
+        .status-badge.reanalyzing { background: #fde68a; color: #78350f; }
         .status-badge.indexed { background: #bbf7d0; color: #14532d; }
         .status-badge.error { background: #fecaca; color: #991b1b; }
         .status-badge.planned { background: #dbeafe; color: #1e40af; }
@@ -713,6 +714,7 @@
                 case 'uploaded': return 'Загружен';
                 case 'processing': return 'Обрабатывается (docling)...';
                 case 'indexed': return 'Готов к поиску';
+                case 'reanalyzing': return 'Переанализ…';
                 case 'error': return 'Ошибка';
                 default: return status;
             }
@@ -724,9 +726,11 @@
             return kb < 1024 ? `${kb.toFixed(0)} КБ` : `${(kb / 1024).toFixed(1)} МБ`;
         }
 
+        let anyReanalyzing = false;   // есть документы в статусе reanalyzing -> опрашиваем чаще
         function loadDocuments() {
             return api('/documents').then(r => r.json()).then(d => {
                 const docs = d.documents || [];
+                anyReanalyzing = docs.some(doc => doc.status === 'reanalyzing');
                 renderDocuments(docs);
                 reconcilePending(docs);
             }).catch(() => {});
@@ -871,7 +875,7 @@
 
         function reanalyzeDoc(filename) {
             api('/documents/' + encodeURIComponent(filename) + '/reanalyze', { method: 'POST' })
-                .then(() => loadDocuments());
+                .then(() => { anyReanalyzing = true; bumpDocPolling(); });   // статус подтянется опросом
         }
 
         function clarifyDoc(filename) {
@@ -885,7 +889,8 @@
 
         function reanalyzeAll() {
             if (!confirm('Запустить повторный анализ всей базы под текущую структуру папок?')) return;
-            api('/documents/reanalyze', { method: 'POST' }).then(() => alert('Повторный анализ запущен в фоне.'));
+            api('/documents/reanalyze', { method: 'POST' })
+                .then(() => { anyReanalyzing = true; bumpDocPolling(); });   // статусы «Переанализ…» подтянутся опросом
         }
 
         function showDocDetail(filename) {
@@ -957,7 +962,7 @@
             clearTimeout(docPollTimer);
             docPollTimer = setTimeout(() => {
                 loadDocuments().finally(scheduleDocPoll);
-            }, pendingDocs.size ? 2000 : 8000);
+            }, (pendingDocs.size || anyReanalyzing) ? 2000 : 8000);
         }
         function bumpDocPolling() { scheduleDocPoll(); }   // ускорить сразу после загрузки файла
 

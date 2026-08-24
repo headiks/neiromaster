@@ -673,32 +673,42 @@ def index_all_documents(docs_dir: Optional[Path] = None, recreate: bool = False)
 def reanalyze_document(filename: str) -> dict:
     """Заново классифицирует уже проиндексированный документ БЕЗ повторного docling/
     эмбеддинга: перечитывает чанки из Qdrant, гоняет их через classify.* и обновляет
-    метки папок/этапов. Дёшево — векторы уже есть."""
-    with _registry_lock:
-        entry = _load_registry().get(filename)
-    summary = (entry or {}).get("summary") or ""
-    doc_cls = classify.classify_document(summary) if summary else {"folders": [], "stage_ids": []}
-    doc_folders = doc_cls["folders"]
+    метки папок/этапов. Дёшево — векторы уже есть.
 
-    offset = None
-    touched = 0
-    while True:
-        batch, offset = client.scroll(
-            collection_name=COLLECTION_NAME,
-            scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=filename))]),
-            limit=256, with_payload=True, with_vectors=True, offset=offset,
-        )
-        for p in batch:
-            base_text = (p.payload or {}).get("raw_text") or (p.payload or {}).get("text") or ""
-            cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
-            client.set_payload(collection_name=COLLECTION_NAME,
-                               payload={"folders": cc["folders"], "stage_ids": cc["stage_ids"]},
-                               points=[p.id])
-            touched += 1
-        if offset is None:
-            break
-    _update_registry(filename, folders=doc_folders, stage_ids=doc_cls["stage_ids"])
-    return {"filename": filename, "folders": doc_folders, "chunks": touched}
+    Статус в реестре ведём по ходу дела (reanalyzing -> indexed/error), чтобы он был
+    виден в списке документов рядом с каждым документом при переанализе."""
+    _update_registry(filename, status="reanalyzing", error=None)
+    try:
+        with _registry_lock:
+            entry = _load_registry().get(filename)
+        summary = (entry or {}).get("summary") or ""
+        doc_cls = classify.classify_document(summary) if summary else {"folders": [], "stage_ids": []}
+        doc_folders = doc_cls["folders"]
+
+        offset = None
+        touched = 0
+        while True:
+            batch, offset = client.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=filename))]),
+                limit=256, with_payload=True, with_vectors=True, offset=offset,
+            )
+            for p in batch:
+                base_text = (p.payload or {}).get("raw_text") or (p.payload or {}).get("text") or ""
+                cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
+                client.set_payload(collection_name=COLLECTION_NAME,
+                                   payload={"folders": cc["folders"], "stage_ids": cc["stage_ids"]},
+                                   points=[p.id])
+                touched += 1
+            if offset is None:
+                break
+        _update_registry(filename, folders=doc_folders, stage_ids=doc_cls["stage_ids"],
+                         status="indexed", error=None)
+        return {"filename": filename, "folders": doc_folders, "chunks": touched}
+    except Exception as e:
+        _log("REANALYZE", f"{filename}: ошибка переанализа ({e})")
+        _update_registry(filename, status="error", error=str(e))
+        return {"filename": filename, "error": str(e)}
 
 
 def reanalyze_all() -> dict:

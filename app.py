@@ -641,7 +641,10 @@ def reanalyze_documents():
 
 @app.post("/documents/{filename}/reanalyze", dependencies=admin_only)
 def reanalyze_one(filename: str):
-    return indexing.reanalyze_document(filename)
+    """Переанализ одного документа — фоново; статус (reanalyzing -> indexed/error)
+    виден в списке документов рядом с этим документом."""
+    _bg(indexing.reanalyze_document, filename)
+    return {"started": True}
 
 
 @app.post("/documents/{filename}/clarify", dependencies=admin_only)
