@@ -637,9 +637,12 @@
             if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
         });
 
-        // Прогресс по каждому файлу: имя -> строка статуса. Файлы обрабатываются
-        // фоновой очередью на сервере, здесь опрашиваем задачу до готовности.
+        // Прогресс по каждому файлу: каноничное имя -> строка статуса. Файлы обрабатываются
+        // фоновой очередью на сервере. Статус тянем из durable-реестра GET /documents
+        // (переживает рестарт и работу в несколько uvicorn-воркеров), а не из джоб-стора
+        // в памяти процесса.
         const uploadStatus = {};
+        const pendingDocs = new Set();   // каноничные имена, ждущие завершения индексации
 
         function renderUploadStatus() {
             const rows = Object.entries(uploadStatus);
@@ -666,9 +669,14 @@
                         renderUploadStatus();
                         return;
                     }
-                    uploadStatus[file.name] = 'в очереди на обработку...';
+                    // Каноничное имя из реестра (санитайзинг мог изменить исходное) —
+                    // по нему сверяемся со списком /documents.
+                    const canonical = data.filename || file.name;
+                    delete uploadStatus[file.name];
+                    uploadStatus[canonical] = 'в очереди на обработку...';
+                    pendingDocs.add(canonical);
                     renderUploadStatus();
-                    pollJob(file.name, data.job_id);
+                    bumpDocPolling();
                 })
                 .catch(err => {
                     uploadStatus[file.name] = `${escapeHtml(err.message)}`;
@@ -676,25 +684,28 @@
                 });
         }
 
-        function pollJob(name, jobId) {
-            api(`/documents/jobs/${encodeURIComponent(jobId)}`).then(r => r.json()).then(job => {
-                if (job.status === 'queued') {
-                    uploadStatus[name] = 'в очереди...';
-                } else if (job.status === 'processing') {
+        // Сверяем ожидающие файлы с durable-реестром /documents: обновляем строку
+        // статуса, а по завершении (indexed/error) убираем её и обновляем счётчики папок.
+        function reconcilePending(docs) {
+            if (!pendingDocs.size) return;
+            const byName = {};
+            docs.forEach(d => { byName[d.filename] = d; });
+            let settled = false;
+            pendingDocs.forEach(name => {
+                const doc = byName[name];
+                if (!doc) return;   // ещё не появился в реестре
+                if (doc.status === 'indexed' || doc.status === 'error') {
+                    delete uploadStatus[name];   // готово/ошибка уже видно в списке документов ниже
+                    pendingDocs.delete(name);
+                    settled = true;
+                } else if (doc.status === 'processing') {
                     uploadStatus[name] = 'разбор docling → чанкинг → эмбеддинги...';
-                } else if (job.status === 'indexed') {
-                    const r = job.result || {};
-                    uploadStatus[name] = `${(r.folders && r.folders.length) ? 'папки: ' + r.folders.map(escapeHtml).join(', ') : 'общая база'}, ${r.chunks} чанков за ${(r.elapsed || 0).toFixed(1)} сек`;
-                    renderUploadStatus(); loadDocuments(); loadFolders();
-                    return;
-                } else if (job.status === 'error') {
-                    uploadStatus[name] = `${escapeHtml((job.result && job.result.error) || 'ошибка обработки')}`;
-                    renderUploadStatus(); loadDocuments();
-                    return;
+                } else {
+                    uploadStatus[name] = 'в очереди на обработку...';
                 }
-                renderUploadStatus();
-                setTimeout(() => pollJob(name, jobId), 1500);
-            }).catch(() => { setTimeout(() => pollJob(name, jobId), 3000); });
+            });
+            renderUploadStatus();
+            if (settled) loadFolders();   // документ отнесён к папкам -> пересчитать «N док.»
         }
 
         function statusLabel(status) {
@@ -714,7 +725,11 @@
         }
 
         function loadDocuments() {
-            api('/documents').then(r => r.json()).then(d => renderDocuments(d.documents || [])).catch(() => {});
+            return api('/documents').then(r => r.json()).then(d => {
+                const docs = d.documents || [];
+                renderDocuments(docs);
+                reconcilePending(docs);
+            }).catch(() => {});
         }
 
         // ---------------- Смысловые папки (управляет человек) ----------------
@@ -936,9 +951,19 @@
                 .catch(err => alert(`Ошибка удаления: ${err.message}`));
         }
 
+        // Самопланирующийся опрос: чаще, пока есть незавершённые загрузки; иначе редко.
+        let docPollTimer = null;
+        function scheduleDocPoll() {
+            clearTimeout(docPollTimer);
+            docPollTimer = setTimeout(() => {
+                loadDocuments().finally(scheduleDocPoll);
+            }, pendingDocs.size ? 2000 : 8000);
+        }
+        function bumpDocPolling() { scheduleDocPoll(); }   // ускорить сразу после загрузки файла
+
         loadDocuments();
         loadFolders();
-        setInterval(loadDocuments, 8000);   // папки статичны — обновляем по действию, не по таймеру
+        scheduleDocPoll();
 
         // ---------------- Конструктор плана ----------------
         let catalog = null;
