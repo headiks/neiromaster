@@ -289,6 +289,7 @@ def search(question, limit=6, folder_slugs=None):
 
 # ---------- Многоуровневый поиск (ТЗ §18–23) ----------
 RETRIEVE_MIN = 3   # достаточно кандидатов — не расширяем поиск на следующий уровень
+QUESTION_ROUTE_THRESHOLD = 0.35   # ниже — вопрос НЕ считаем отнесённым к папке (тогда общая база)
 
 
 def _folders_for_stages(stage_ids):
@@ -332,7 +333,7 @@ def fetch_neighbors(source, chunk_index, span=1):
 def cascade_search(question, current_stage_ids=None, limit=8):
     """L1 релевантные папки -> L3 папки текущего этапа -> L4 вся база. Приоритет —
     свежесть документа и текущий этап (буст, не жёсткий фильтр — ТЗ §6, §24)."""
-    matched = classify.match_folders(question, top_k=3, threshold=0.3)
+    matched = classify.match_folders(question, top_k=3, threshold=QUESTION_ROUTE_THRESHOLD)
     folder_slugs = [m[0] for m in matched]
     cands = search(question, limit=limit, folder_slugs=folder_slugs or None)
 
@@ -341,7 +342,11 @@ def cascade_search(question, current_stage_ids=None, limit=8):
         if stage_folders:
             cands = _merge(cands, search(question, limit=limit, folder_slugs=stage_folders))
 
-    if len(cands) < RETRIEVE_MIN:
+    # К общей базе БЕЗ фильтра откатываемся только если вопрос не отнесён ни к одной папке
+    # (общий вопрос / тема вне известных папок). Если вопрос отнесён к папке — не подмешиваем
+    # чужие темы: лучше вернуть мало точных фрагментов, чем выдать оборудование сварщика
+    # пожарному. Недостачу закроет ответ «в базе не нашлось» (маршрут к человеку).
+    if len(cands) < RETRIEVE_MIN and not folder_slugs:
         cands = _merge(cands, search(question, limit=limit, folder_slugs=None))
 
     sset = set(current_stage_ids or [])

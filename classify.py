@@ -200,23 +200,32 @@ def classify_document(summary: str) -> dict:
     }
 
 
+def select_chunk_folders(matches, doc_folders) -> list:
+    """Папки чанка = (папки документа) ∩ (папки, к которым близок сам чанк).
+
+    Чистая функция (без Qdrant/БД) — тестируется отдельно. Ключевой инвариант для
+    разделения тем: чанк НЕ уходит в папку, к которой не отнесён документ, и НЕ
+    наследует автоматически все папки документа. В папке остаются только те чанки,
+    которые сами по смыслу ей подходят — иначе фильтр по папке при ответе перестаёт
+    отличать темы (оборудование сварщика не должно попадать пожарному).
+
+    matches — [(slug, name, stage_ids, score)] выше порога CHUNK_MATCH_THRESHOLD."""
+    doc_set = set(doc_folders or [])
+    out = []
+    for slug, _name, _st, _score in matches:
+        if slug in doc_set and slug not in out:
+            out.append(slug)
+    return out
+
+
 def classify_chunk(text: str, doc_folders: list, vec=None) -> dict:
     """Метки папок для отдельного чанка — по вектору (масштабируемо, без LLM на чанк).
-    Берём папки, к которым чанк близок; ограничиваем набором документа, чтобы чанк не
-    уплывал в чужие темы, но при сильном совпадении допускаем и папку вне набора дока
-    (один чанк может относиться к нескольким папкам — ТЗ §13). vec — уже посчитанный
-    вектор чанка (чтобы не эмбеддить повторно при индексации)."""
+    vec — уже посчитанный вектор чанка (чтобы не эмбеддить повторно при индексации).
+    Чанк без близкой папки из набора документа остаётся без меток — он найдётся только
+    в общей базе «Все документы», но не подмешается в чужую папку при фильтрованном поиске."""
     matches = (match_folders_by_vector(vec, top_k=5, threshold=CHUNK_MATCH_THRESHOLD)
                if vec is not None else match_folders(text, top_k=5, threshold=CHUNK_MATCH_THRESHOLD))
-    doc_set = set(doc_folders or [])
-    chunk_folders = []
-    for slug, _name, _st, score in matches:
-        if slug in doc_set or score >= 0.6:
-            chunk_folders.append(slug)
-    # Если по вектору ничего не выбралось, но документ отнесён к папкам — наследуем их,
-    # чтобы чанк оставался находимым внутри папок документа.
-    if not chunk_folders and doc_folders:
-        chunk_folders = list(doc_folders)
+    chunk_folders = select_chunk_folders(matches, doc_folders)
     by_slug = {f["slug"]: f for f in folders.list_folders(include_disabled=False)}
     return {"folders": chunk_folders, "stage_ids": _stage_union(chunk_folders, by_slug)}
 
