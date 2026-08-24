@@ -37,6 +37,28 @@ def test_no_duplicates():
     assert select_chunk_folders(_m(("a", 0.9), ("a", 0.8)), ["a"]) == ["a"]
 
 
+def test_llm_confirm_honors_empty():
+    # модель подтвердила «ни одна» -> фрагмент уходит в общую базу
+    import classify
+    classify._llm = lambda s, u: '{"folders": []}'
+    assert classify._llm_confirm_chunk_folders("txt", ["a", "b"], {}) == []
+
+
+def test_llm_confirm_filters_foreign():
+    # модель вернула папку не из кандидатов -> отбрасываем
+    import classify
+    classify._llm = lambda s, u: '{"folders": ["a", "zzz"]}'
+    assert classify._llm_confirm_chunk_folders("txt", ["a", "b"], {}) == ["a"]
+
+
+def test_llm_confirm_error_falls_back_to_candidates():
+    # ошибка модели -> не теряем векторную разметку
+    import classify
+    def boom(s, u): raise RuntimeError("ollama down")
+    classify._llm = boom
+    assert classify._llm_confirm_chunk_folders("txt", ["a", "b"], {}) == ["a", "b"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

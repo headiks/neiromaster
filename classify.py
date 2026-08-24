@@ -21,6 +21,7 @@ classify.py — смысловой анализ документов и их ч�
     векторами в коллекции "doc_summaries".
 """
 
+import os
 import re
 import json
 from typing import Optional
@@ -45,8 +46,13 @@ LLM_MODEL = "qwen3:14b"
 LLM_TIMEOUT = 180
 
 DOC_MATCH_THRESHOLD = 0.30    # кандидат-папка для документа (широкий отбор, потом уточняет LLM)
-CHUNK_MATCH_THRESHOLD = 0.45  # метка папки для отдельного чанка (без LLM, по вектору)
+CHUNK_MATCH_THRESHOLD = 0.45  # кандидат-папка для чанка по вектору (дальше подтверждает LLM)
 SIMILAR_DOC_THRESHOLD = 0.80  # порог «похожий/связанный документ» при загрузке
+
+# Подтверждать принадлежность чанка папке большой моделью (не только эмбеддингом).
+# Точнее разделяет темы, но добавляет по LLM-вызову на чанк с кандидатами. Отключаемо
+# на очень большом корпусе: NEIROMASTER_CHUNK_LLM=0.
+CHUNK_LLM_CONFIRM = os.environ.get("NEIROMASTER_CHUNK_LLM", "1") not in ("0", "false", "False", "")
 
 
 def _log(step, msg):
@@ -218,15 +224,43 @@ def select_chunk_folders(matches, doc_folders) -> list:
     return out
 
 
+CHUNK_SELECT_SYSTEM = """Ты решаешь, к каким смысловым папкам относится ОТДЕЛЬНЫЙ ФРАГМЕНТ
+документа. Тебе дают текст фрагмента и папки-КАНДИДАТЫ с их критериями. Верни ТОЛЬКО те
+папки, содержанию которых фрагмент действительно соответствует по смыслу критериев — так,
+чтобы по вопросу из этой темы фрагмент был уместным ответом. Если фрагмент не подходит ни
+одной — верни пустой список. Ответ — СТРОГО JSON: {"folders": ["slug", ...]}. Без пояснений."""
+
+
+def _llm_confirm_chunk_folders(text: str, cand_slugs: list, by_slug: dict) -> list:
+    """Большая модель подтверждает, каким папкам-кандидатам фрагмент реально соответствует
+    по критериям (эмбеддинг лишь предложил кандидатов). Пустой список — законный ответ:
+    фрагмент не подходит ни одной, остаётся в общей базе. При ошибке модели — возвращаем
+    кандидатов как есть (не теряем векторную разметку)."""
+    lines = []
+    for slug in cand_slugs:
+        f = by_slug.get(slug) or {}
+        crit = "; ".join(f.get("criteria") or [])
+        lines.append(f"- {slug} ({f.get('name', slug)}): {crit}")
+    try:
+        raw = _llm(CHUNK_SELECT_SYSTEM, f"Фрагмент:\n{text[:1500]}\n\nПапки-кандидаты:\n" + "\n".join(lines))
+        picked = _parse_json(raw).get("folders") or []
+        return [s for s in picked if s in cand_slugs]
+    except Exception as e:
+        _log("CHUNK-LLM", f"подтверждение не удалось ({e}) — беру векторных кандидатов")
+        return list(cand_slugs)
+
+
 def classify_chunk(text: str, doc_folders: list, vec=None) -> dict:
-    """Метки папок для отдельного чанка — по вектору (масштабируемо, без LLM на чанк).
+    """Метки папок для отдельного чанка. Двухступенчато: эмбеддинг предлагает кандидатов
+    (в пределах папок документа), большая модель подтверждает соответствие критериям.
     vec — уже посчитанный вектор чанка (чтобы не эмбеддить повторно при индексации).
-    Чанк без близкой папки из набора документа остаётся без меток — он найдётся только
-    в общей базе «Все документы», но не подмешается в чужую папку при фильтрованном поиске."""
+    Чанк без подходящей папки остаётся без меток — найдётся только в общей базе «Все
+    документы», но не подмешается в чужую папку при фильтрованном поиске."""
     matches = (match_folders_by_vector(vec, top_k=5, threshold=CHUNK_MATCH_THRESHOLD)
                if vec is not None else match_folders(text, top_k=5, threshold=CHUNK_MATCH_THRESHOLD))
-    chunk_folders = select_chunk_folders(matches, doc_folders)
+    cand = select_chunk_folders(matches, doc_folders)
     by_slug = {f["slug"]: f for f in folders.list_folders(include_disabled=False)}
+    chunk_folders = _llm_confirm_chunk_folders(text, cand, by_slug) if (cand and CHUNK_LLM_CONFIRM) else cand
     return {"folders": chunk_folders, "stage_ids": _stage_union(chunk_folders, by_slug)}
 
 
