@@ -755,6 +755,7 @@
                     ${f.description ? `<div class="desc">${escapeHtml(f.description)}</div>` : ''}
                     <div class="count">${f.criteria.length} критериев · ${f.documents || 0} док.</div>
                     <div class="row-actions">
+                        <button class="icon-btn" title="Показать чанки" onclick="showFolderChunks('${escapeHtml(f.slug)}','${escapeHtml(f.name)}')"><i data-lucide="layers"></i></button>
                         <button class="icon-btn" title="Изменить" onclick="openFolderDialog('${f.id}')"><i data-lucide="pencil"></i></button>
                         <button class="icon-btn" title="${f.enabled ? 'Отключить' : 'Включить'}" onclick="toggleFolder('${f.id}',${!f.enabled})"><i data-lucide="${f.enabled ? 'eye-off' : 'eye'}"></i></button>
                         <button class="icon-btn danger" title="Удалить" onclick="deleteFolder('${f.id}')"><i data-lucide="trash-2"></i></button>
@@ -905,6 +906,47 @@
                     body.innerHTML = renderDocDetail(data);
                 })
                 .catch(err => { body.innerHTML = `<div class="error">Ошибка: ${escapeHtml(err.message)}</div>`; });
+        }
+
+        function showFolderChunks(slug, name) {
+            const dialog = document.getElementById('doc-detail-dialog');
+            const body = document.getElementById('doc-detail-body');
+            document.getElementById('doc-detail-title').textContent = `Папка: ${name}`;
+            body.innerHTML = `<div class="empty-hint">Загружаем чанки папки…</div>`;
+            dialog.showModal();
+            apiJson(`/folders/${encodeURIComponent(slug)}/chunks`)
+                .then(({ ok, data }) => {
+                    if (!ok) { body.innerHTML = `<div class="warn"><i data-lucide="triangle-alert"></i> ${escapeHtml(data.detail || 'Не удалось получить данные')}</div>`; return; }
+                    body.innerHTML = renderFolderChunks(data);
+                    refreshIcons();
+                })
+                .catch(err => { body.innerHTML = `<div class="error">Ошибка: ${escapeHtml(err.message)}</div>`; });
+        }
+
+        function renderFolderChunks(data) {
+            const chunks = data.chunks || [];
+            if (!chunks.length) return `<div class="empty-hint">В этой папке пока нет чанков. Загрузите/переанализируйте документы под текущую структуру папок.</div>`;
+            const head = `<div class="doc-meta" style="margin-bottom:12px;">
+                Чанков в папке: <strong>${data.count}</strong>${data.truncated ? ' (показаны первые)' : ''}.
+                Это конкретные фрагменты документов, отнесённые к папке по смыслу — именно из них
+                формируется ответ на вопрос в этой теме.
+            </div>`;
+            const rows = chunks.map(c => {
+                const meta = [
+                    c.section ? `§ ${escapeHtml(c.section)}` : null,
+                    c.page != null ? `стр. ${c.page}` : null,
+                    c.length != null ? `${c.length} симв.` : null,
+                ].filter(Boolean).join(' · ');
+                return `<div class="card" style="margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                        <strong><i data-lucide="file-text"></i> ${escapeHtml(c.source || '—')} · чанк #${c.chunk_index != null ? c.chunk_index : '?'}</strong>
+                        <small style="color:#94a3b8;">id: ${escapeHtml(c.id)}</small>
+                    </div>
+                    ${meta ? `<div class="doc-meta" style="margin:4px 0;">${meta}</div>` : ''}
+                    <div class="msg-text" style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(c.text || '—')}</div>
+                </div>`;
+            }).join('');
+            return head + rows;
         }
 
         function renderDocDetail(data) {
