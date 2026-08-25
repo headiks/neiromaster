@@ -67,6 +67,13 @@ def test_extract_section_forward_fill():
     assert [r["department"] for r in recs] == ["Администрация", "Администрация", "Продажи"]
 
 
+def test_extract_skips_header_word_row():
+    grid = [["1", "Сотрудник", "Должность"], ["1", "Иванов", "Бухгалтер"]]
+    mapping = {"data_start_row": 0, "columns": {"full_name": 1, "position": 2}, "sections": {}}
+    recs = tablemap.extract_records(grid, mapping, required=["full_name"])
+    assert recs == [{"full_name": "Иванов", "position": "Бухгалтер"}]
+
+
 def test_map_columns_parses_sections():
     tablemap._llm = lambda s, u: '{"data_start_row":1,"columns":{"full_name":1,"position":2},"sections":{"department":0}}'
     fields = FIELDS + [{"name": "department", "description": "отдел"}]
