@@ -29,14 +29,16 @@ from config import OLLAMA_URL
 
 # Единая выходная схема — 4 поля, и только они.
 UNIFIED_FIELDS = [
-    {"name": "full_name",  "description": "ФИО человека: фамилия имя отчество (если в файле есть люди)"},
-    {"name": "position",   "description": "должность/профессия"},
-    {"name": "department", "description": "подразделение/отдел; часто отдельная строка-баннер над блоком"},
+    {"name": "full_name",  "description": "ФИО человека (фамилия имя отчество), если в файле есть люди"},
+    {"name": "position",   "description": "краткое НАЗВАНИЕ должности/профессии (например «Главный геолог», «Электросварщик 5 разряда»). НЕ колонка с описанием обязанностей и НЕ категория персонала (Рабочие/Специалисты/Руководители)"},
+    {"name": "department", "description": "название подразделения/отдела/участка; часто отдельная строка-баннер над блоком, а не столбец"},
     {"name": "start_date", "description": "дата приёма или выхода на работу"},
 ]
 FIELD_KEYS = ["full_name", "position", "department", "start_date"]
 
-SMALL_MODEL = "qwen2.5:3b"
+# Классификация ячеек — большой моделью (точнее отличает должность от описания
+# обязанностей и категории персонала, надёжнее ловит ФИО). Медленнее, идёт батчами.
+CLASSIFY_MODEL = "qwen3:14b"
 BATCH_SIZE = 40
 
 _TRANSLIT = str.maketrans({
@@ -85,20 +87,31 @@ CLASSES = ("person", "position", "org", "other")
 
 BATCH_SYSTEM = """Ты классифицируешь ячейки таблицы штатного расписания. Для каждого
 пронумерованного элемента верни ОДИН класс:
-person — ФИО человека (имя/фамилия/отчество конкретного человека);
-position — должность или профессия;
-org — организационная единица (подразделение, отдел, департамент, служба, цех, организация);
-other — всё прочее (заголовок столбца, итог, число, дата, код, примечание).
+person — ФИО конкретного человека (фамилия/имя/отчество);
+position — краткое НАЗВАНИЕ должности или профессии;
+org — организационная единица (подразделение, отдел, департамент, служба, цех, участок, организация);
+other — всё прочее: описание обязанностей (целое предложение), категория персонала
+        (Рабочие/Специалисты/Руководители/Управленческий персонал), заголовок, итог, число, дата, код.
+
+Примеры:
+«Главный геолог» -> position
+«Электросварщик ручной сварки, 5 разряд» -> position
+«Руководит деятельностью технических служб» -> other  (это описание обязанностей, не должность)
+«Специалисты», «Управленческий персонал», «Рабочие» -> other  (категория персонала)
+«Обособленное подразделение Рудник», «Механо-монтажный участок» -> org
+«Иванов Иван Иванович» -> person
+«Итого», «24», «15.05.2026», «2290000а-14612» -> other
+
 Верни ТОЛЬКО JSON-массив строк той же длины и в том же порядке, например:
 ["person","org","position","other"]. Без пояснений."""
 
 
-def _small_llm(system: str, user: str) -> str:
+def _classify_llm(system: str, user: str) -> str:
     r = requests.post(f"{OLLAMA_URL}/api/chat", json={
-        "model": SMALL_MODEL,
+        "model": CLASSIFY_MODEL,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "stream": False, "think": False,
-    }, timeout=120)
+    }, timeout=300)
     r.raise_for_status()
     return r.json()["message"]["content"].strip()
 
@@ -117,7 +130,7 @@ def _classify_batch(chunk: list) -> dict:
     'position' (получаем вакансии, но не выдаём мусор за людей)."""
     body = "\n".join(f"{i + 1}. {t[:120]}" for i, t in enumerate(chunk))
     try:
-        labels = _parse_labels(_small_llm(BATCH_SYSTEM, body), len(chunk))
+        labels = _parse_labels(_classify_llm(BATCH_SYSTEM, body), len(chunk))
     except Exception:
         return {t: "position" for t in chunk}
     return {t: (labels[i] if i < len(labels) else "other") for i, t in enumerate(chunk)}
@@ -139,39 +152,68 @@ def _cell(row, col):
     return (row[col].strip() if (col is not None and col < len(row) and row[col] is not None) else "")
 
 
+def _guess_subject_col(grid: list, start: int) -> int:
+    """Колонка с наибольшим числом текстовых (буквенных, не числовых) ячеек — обычно там
+    названия должностей/подразделений/людей. Фолбэк, когда модель не нашла нужную колонку."""
+    import collections
+    cnt = collections.Counter()
+    for row in grid[start:start + 60]:
+        for c, v in enumerate(row):
+            v = (v or "").strip()
+            if v and any(ch.isalpha() for ch in v):
+                cnt[c] += 1
+    return cnt.most_common(1)[0][0] if cnt else 0
+
+
 def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
     """Единые записи [{full_name, position, department, start_date}]. Маршрут строки — по
-    КЛАССУ её значимых ячеек (ФИО-колонка, должность-колонка, баннер-колонка), а не по тому,
-    как модель угадала назначение столбца. Отдел протягивается из строк-баннеров (org)."""
+    КЛАССУ её ячеек (person/position/org), а не по тому, как модель угадала назначение
+    столбца. Колонки ФИО и должности выбираются робастно: из кандидатов (разметка модели +
+    текстовая колонка) берётся та, где реально больше person / position. Отдел протягивается
+    из строк-баннеров (org)."""
     cols = mapping.get("columns") or {}
     sections = mapping.get("sections") or {}
     start = mapping.get("data_start_row") or 0
-    name_c, pos_c, date_c = cols.get("full_name"), cols.get("position"), cols.get("start_date")
+    date_c = cols.get("start_date")
     dept_c = cols.get("department")
-    dept_sec = sections.get("department", dept_c if dept_c is not None else None)
     rows = grid[start:]
+    subj_c = _guess_subject_col(grid, start)
 
-    def cells(row):
-        nm = _cell(row, name_c)
-        ps = _cell(row, pos_c)
-        sv = _cell(row, dept_sec) if dept_sec is not None else ""
-        return nm, ps, sv
-
-    # собираем все значимые тексты и классифицируем одним проходом (батчами)
+    # кандидаты столбцов, которые классифицируем: разметка модели + текстовая колонка
+    cand_cols = {c for c in (cols.get("full_name"), cols.get("position"), subj_c,
+                             sections.get("department"), dept_c) if c is not None}
     texts = set()
     for row in rows:
-        texts.update(cells(row))
+        for c in cand_cols:
+            texts.add(_cell(row, c))
     labels = classify_cells(texts, classifier)
 
     def lab(t):
         return labels.get((t or "").strip()) if (t or "").strip() else None
+
+    def count(col, cls):
+        return -1 if col is None else sum(1 for row in rows if lab(_cell(row, col)) == cls)
+
+    # эффективные колонки: где реально больше нужного класса
+    name_c = max([cols.get("full_name"), subj_c], key=lambda c: count(c, "person"))
+    if count(name_c, "person") <= 0:
+        name_c = None
+    pos_c = max([cols.get("position"), subj_c], key=lambda c: count(c, "position"))
+    if count(pos_c, "position") <= 0:
+        pos_c = None
+    dept_sec = sections.get("department")
+    if dept_sec is None:
+        dept_sec = subj_c if count(subj_c, "org") > 0 else None
+
+    def cells(row):
+        return _cell(row, name_c), _cell(row, pos_c), (_cell(row, dept_sec) if dept_sec is not None else "")
 
     carried = ""
     out = []
     for row in rows:
         nm, ps, sv = cells(row)
         date = _cell(row, date_c)
-        dept_col = _cell(row, dept_c) if (dept_c is not None and dept_c not in (pos_c, name_c)) else ""
+        dept_col = _cell(row, dept_c) if (dept_c is not None and dept_c not in (pos_c, name_c, dept_sec)) else ""
         nr, pr, sr = lab(nm), lab(ps), lab(sv)
 
         if nr == "person":
