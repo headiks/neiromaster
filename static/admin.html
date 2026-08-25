@@ -324,10 +324,10 @@
     <div class="tab-pane active" id="pane-staffing">
         <h2><i data-lucide="table"></i> Штатное расписание</h2>
         <p class="muted" style="color:#64748b;font-size:14px;">
-            Первичный инструмент: загрузите штатку (xlsx) — ИИ сам определит, какой столбец
-            какому полю соответствует, и создаст профили сотрудников. Логин выдаётся по ФИО,
-            пароль временный (сотрудник сменит при первом входе). Должности из штатки станут
-            доступны в списке при заполнении карточек.
+            Первичный инструмент: загрузите штатку (xlsx, xls, csv) — ИИ сам определит структуру.
+            Если в файле есть ФИО — создаются профили сотрудников (логин по ФИО, временный пароль).
+            Если это расписание должностей без людей — создаются профили-вакансии (по должностям и
+            подразделениям, заполните ФИО позже). Должности попадут в список при заполнении карточек.
         </p>
         <div class="dropzone" id="staffing-dropzone">
             <div><i data-lucide="file-spreadsheet" style="width:28px;height:28px;display:block;margin:0 auto 8px;color:var(--color-accent);"></i> Перетащите штатку (xlsx или csv) сюда или нажмите, чтобы выбрать файл</div>
@@ -931,8 +931,13 @@
 
         // ---------------- Штатное расписание ----------------
         const STAFFING_LABELS = { full_name: 'ФИО', position: 'Должность', department: 'Отдел',
-                                  tab_number: 'Табельный №', start_date: 'Дата приёма' };
+                                  tab_number: 'Табельный №', start_date: 'Дата приёма', count: 'Ставок' };
+        const STAFFING_KEYS = {
+            roster: ['full_name', 'position', 'department', 'tab_number', 'start_date'],
+            schedule: ['position', 'department', 'count'],
+        };
         let staffingRecords = [];
+        let staffingMode = 'roster';
 
         function staffingPreview(fileArg) {
             const file = fileArg || document.getElementById('staffing-file').files[0];
@@ -947,36 +952,38 @@
                 .then(({ ok, data }) => {
                     if (!ok) { status.innerHTML = `<span class="err">${escapeHtml(data.detail || 'ошибка разбора')}</span>`; return; }
                     staffingRecords = data.records || [];
-                    status.textContent = `Найдено сотрудников: ${data.count}. Поля можно отредактировать перед созданием.`;
+                    staffingMode = data.mode || 'roster';
+                    const what = staffingMode === 'schedule' ? 'должностей (вакансий)' : 'сотрудников';
+                    status.textContent = `Тип: ${staffingMode === 'schedule' ? 'штатное расписание должностей' : 'список сотрудников'}. Найдено ${what}: ${data.count}. Поля можно отредактировать.`;
                     window._staffingCols = (data.mapping || {}).columns || {};
                     renderStaffingPreview(window._staffingCols);
                 })
                 .catch(err => { status.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`; });
         }
 
-        const STAFFING_FIELD_KEYS = ['full_name', 'position', 'department', 'tab_number', 'start_date'];
-
         function renderStaffingPreview(cols) {
             const preview = document.getElementById('staffing-preview');
+            const keys = STAFFING_KEYS[staffingMode] || STAFFING_KEYS.roster;
             if (!staffingRecords.length) {
-                preview.innerHTML = (cols.full_name == null)
-                    ? '<div class="warn"><i data-lucide="triangle-alert"></i> Не найдена колонка с ФИО. Похоже, это расписание должностей (штатка формы Т-3) без списка людей — создавать профили не из чего. Загрузите список сотрудников с ФИО.</div>'
-                    : '<div class="empty-hint">В таблице не найдено сотрудников.</div>';
+                preview.innerHTML = '<div class="warn"><i data-lucide="triangle-alert"></i> В таблице не найдено ни сотрудников, ни должностей. Проверьте файл или поправьте вручную.</div>';
                 refreshIcons();
                 return;
             }
-            const mapLine = STAFFING_FIELD_KEYS.map(f =>
-                `${STAFFING_LABELS[f]}: ${cols[f] != null ? 'столбец ' + cols[f] : '<span class="muted">не найден</span>'}`).join(' · ');
-            const head = STAFFING_FIELD_KEYS.map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('') + '<th></th>';
+            const mapLine = keys.map(f =>
+                `${STAFFING_LABELS[f]}: ${cols[f] != null ? 'столбец ' + cols[f] : '<span class="muted">не найден/баннер</span>'}`).join(' · ');
+            const head = keys.map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('') + '<th></th>';
             const rows = staffingRecords.map((r, i) =>
-                `<tr>${STAFFING_FIELD_KEYS.map(f =>
+                `<tr>${keys.map(f =>
                     `<td><input type="text" style="width:100%;box-sizing:border-box;" value="${escapeHtml(r[f] || '')}"
                           oninput="staffingRecords[${i}]['${f}']=this.value"></td>`).join('')}
                  <td><button class="icon-btn danger" title="Убрать строку" onclick="staffingRemoveRow(${i})"><i data-lucide="x"></i></button></td></tr>`).join('');
+            const btnLabel = staffingMode === 'schedule'
+                ? `<i data-lucide="briefcase"></i> Создать вакансии (${staffingRecords.length})`
+                : `<i data-lucide="user-plus"></i> Создать профили (${staffingRecords.length})`;
             preview.innerHTML = `
                 <div class="section-head-row" style="margin:14px 0 6px;">
                     <div class="doc-meta">Разметка: ${mapLine}</div>
-                    <button class="ghost-btn" onclick="staffingImport()"><i data-lucide="user-plus"></i> Создать профили (<span id="staffing-count">${staffingRecords.length}</span>)</button>
+                    <button class="ghost-btn" onclick="staffingImport()">${btnLabel}</button>
                 </div>
                 <div style="overflow-x:auto;"><table class="tst" style="font-size:13px;">
                     <thead><tr>${head}</tr></thead><tbody id="staffing-tbody">${rows}</tbody></table></div>`;
@@ -990,14 +997,28 @@
 
         function staffingImport() {
             if (!staffingRecords.length) return;
-            if (!confirm(`Создать ${staffingRecords.length} профилей? Существующие (по ФИО) будут пропущены.`)) return;
+            const isSchedule = staffingMode === 'schedule';
+            const q = isSchedule
+                ? `Создать ${staffingRecords.length} профилей-вакансий (без ФИО и логина)?`
+                : `Создать ${staffingRecords.length} профилей? Существующие (по ФИО) будут пропущены.`;
+            if (!confirm(q)) return;
             const status = document.getElementById('staffing-status');
-            status.textContent = 'Создаём профили…';
+            status.textContent = isSchedule ? 'Создаём вакансии…' : 'Создаём профили…';
             apiJson('/staffing/import', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ records: staffingRecords })
+                body: JSON.stringify({ records: staffingRecords, mode: staffingMode })
             }).then(({ ok, data }) => {
                 if (!ok) { status.innerHTML = `<span class="err">${escapeHtml(data.detail || 'ошибка создания')}</span>`; return; }
+                if (isSchedule) {
+                    const created = data.created || [];
+                    status.textContent = `Создано вакансий: ${created.length}.`;
+                    const rows = created.map(c => `<tr><td>${escapeHtml(c.position)}</td><td>${escapeHtml(c.department || '')}</td><td>${escapeHtml(c.count || '')}</td></tr>`).join('');
+                    document.getElementById('staffing-result').innerHTML = created.length
+                        ? `<div style="overflow-x:auto;margin-top:10px;"><table class="tst" style="font-size:13px;"><thead><tr><th>Должность</th><th>Отдел</th><th>Ставок</th></tr></thead><tbody>${rows}</tbody></table></div>`
+                        : '';
+                    employeesLoaded = false; loadEmployees();
+                    return;
+                }
                 const created = data.created || [], skipped = data.skipped || [];
                 status.textContent = `Создано: ${created.length}, пропущено: ${skipped.length}.`;
                 window._staffingCreated = created;
