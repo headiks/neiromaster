@@ -71,14 +71,63 @@ def _temp_password(length: int = 10) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+# Поля для штатного расписания БЕЗ людей (список должностей по подразделениям).
+# Дискриминатор строки-должности — число ставок (у строк-баннеров подразделений его нет).
+POSITION_FIELDS = [
+    {"name": "position",   "description": "должность (наименование штатной позиции)"},
+    {"name": "department", "description": "подразделение/отдел; обычно строка-баннер над должностями"},
+    {"name": "count",      "description": "количество штатных единиц/ставок именно у этой должности (число в строке должности, НЕ суммарное у подразделения)"},
+]
+
+
 def parse(grid: list) -> dict:
     """Разметка штатки моделью + извлечение записей. {"mapping": {...}, "records": [...]}"""
     return tablemap.normalize_table(grid, STAFFING_FIELDS, required=["full_name"])
 
 
+def _looks_like_name(s: str) -> bool:
+    """Похоже на ФИО: есть пробел, буквы, нет цифр, длина разумная."""
+    s = (s or "").strip()
+    return bool(s) and " " in s and len(s) >= 5 and not any(ch.isdigit() for ch in s)
+
+
+def _is_roster(records: list) -> bool:
+    """Список людей, если у большинства записей ФИО похоже на настоящее имя."""
+    names = [r.get("full_name", "") for r in records]
+    good = sum(1 for n in names if _looks_like_name(n))
+    return bool(names) and good >= max(1, len(names) * 0.5)
+
+
 def parse_file(source, filename: str = None) -> dict:
-    """Разбор xlsx или csv (по имени файла) в записи штатки."""
-    return parse(tablemap.read_table_grid(source, filename))
+    """Разбор xlsx/xls/csv. Определяет тип документа:
+      mode=roster   — список сотрудников (есть ФИО) -> профили;
+      mode=schedule — штатное расписание должностей (ФИО нет) -> вакансии.
+    Возвращает {"mode", "mapping", "records", "count"}."""
+    grid = tablemap.read_table_grid(source, filename)
+    roster = parse(grid)
+    if _is_roster(roster["records"]):
+        return {"mode": "roster", **roster, "count": len(roster["records"])}
+    schedule = tablemap.normalize_table(grid, POSITION_FIELDS, required=["count"])
+    return {"mode": "schedule", **schedule, "count": len(schedule["records"])}
+
+
+def import_vacancies(records: list) -> dict:
+    """Создаёт профили-вакансии из строк расписания должностей (по одной на позицию,
+    без ФИО и без логина). Число ставок сохраняем в примечании. Возвращает сводку."""
+    created = []
+    for rec in records:
+        position = (rec.get("position") or "").strip()
+        if not position:
+            continue
+        department = (rec.get("department") or "").strip()
+        count = (rec.get("count") or "").strip()
+        users.create_user(
+            {"full_name": f"(вакансия) {position}", "position": position,
+             "department": department, "notes": f"Вакансия из штатного расписания. Ставок: {count or '—'}."},
+            role=users.ROLE_EMPLOYEE,
+        )   # без username/password — плейсхолдер, заполняется позже
+        created.append({"position": position, "department": department, "count": count})
+    return {"created": created}
 
 
 def import_records(records: list) -> dict:

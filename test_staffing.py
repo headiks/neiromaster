@@ -30,6 +30,20 @@ def test_temp_password_length_and_charset():
     assert not (set("0O1lI") & set(p))   # без похожих символов
 
 
+def test_looks_like_name():
+    assert staffing._looks_like_name("Иванов Иван Иванович")
+    assert not staffing._looks_like_name("1")
+    assert not staffing._looks_like_name("Кладовщик")      # одно слово, без пробела
+    assert not staffing._looks_like_name("Отдел 5")        # есть цифра
+
+
+def test_is_roster_vs_schedule():
+    roster = [{"full_name": "Иванов Иван Иванович"}, {"full_name": "Петров Пётр Петрович"}]
+    schedule = [{"full_name": "1"}, {"full_name": "8"}, {"full_name": ""}]
+    assert staffing._is_roster(roster) is True
+    assert staffing._is_roster(schedule) is False
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
