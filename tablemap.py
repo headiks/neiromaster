@@ -29,7 +29,11 @@ SAMPLE_ROWS = 22   # сколько первых строк показываем
 
 
 def _cell(v) -> str:
-    return "" if v is None else str(v).strip()
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))   # «1.0» -> «1», табельный/№ из числовых ячеек без хвоста .0
+    return str(v).strip()
 
 
 def _llm(system: str, user: str) -> str:
@@ -203,9 +207,36 @@ def read_csv_grid(source) -> list:
     return [[_cell(c) for c in row] for row in reader]
 
 
+def read_xls_grid(source) -> list:
+    """Читает старый .xls (Excel 97-2003) через xlrd. Даты в .xls хранятся числом —
+    конвертируем в дату по datemode книги."""
+    import xlrd
+    wb = (xlrd.open_workbook(file_contents=bytes(source)) if isinstance(source, (bytes, bytearray))
+          else xlrd.open_workbook(source))
+    ws = wb.sheet_by_index(0)
+    grid = []
+    for r in range(ws.nrows):
+        row = []
+        for c in range(ws.ncols):
+            cell = ws.cell(r, c)
+            if cell.ctype == xlrd.XL_CELL_DATE:
+                try:
+                    dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
+                    row.append(dt.strftime("%d.%m.%Y") if (dt.hour == 0 and dt.minute == 0)
+                               else dt.strftime("%d.%m.%Y %H:%M"))
+                    continue
+                except Exception:
+                    pass
+            row.append(_cell(cell.value))
+        grid.append(row)
+    return grid
+
+
 def read_table_grid(source, filename: Optional[str] = None) -> list:
-    """Единая точка чтения таблицы: CSV/TSV или xlsx — по расширению имени файла."""
+    """Единая точка чтения таблицы по расширению имени файла: CSV/TSV, старый .xls или xlsx."""
     name = (filename or (source if isinstance(source, str) else "")).lower()
     if name.endswith(".csv") or name.endswith(".tsv"):
         return read_csv_grid(source)
+    if name.endswith(".xls"):
+        return read_xls_grid(source)
     return read_xlsx_grid(source)
