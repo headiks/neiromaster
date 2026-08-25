@@ -505,6 +505,10 @@
         </div>
 
         <div id="pending-block"></div>
+        <div class="section-head-row" style="margin-top:24px;">
+            <h2 class="section-title"><i data-lucide="users"></i> Список пользователей</h2>
+            <button class="del-btn" onclick="deleteNonAdmins()"><i data-lucide="user-x"></i> Удалить всех (кроме админов)</button>
+        </div>
         <div id="employee-list"><div class="empty-hint">Загрузка списка пользователей...</div></div>
         <div id="employee-schedule"></div>
     </div>
@@ -954,7 +958,13 @@
 
         function renderStaffingPreview(cols) {
             const preview = document.getElementById('staffing-preview');
-            if (!staffingRecords.length) { preview.innerHTML = '<div class="empty-hint">В таблице не найдено сотрудников.</div>'; return; }
+            if (!staffingRecords.length) {
+                preview.innerHTML = (cols.full_name == null)
+                    ? '<div class="warn"><i data-lucide="triangle-alert"></i> Не найдена колонка с ФИО. Похоже, это расписание должностей (штатка формы Т-3) без списка людей — создавать профили не из чего. Загрузите список сотрудников с ФИО.</div>'
+                    : '<div class="empty-hint">В таблице не найдено сотрудников.</div>';
+                refreshIcons();
+                return;
+            }
             const mapLine = STAFFING_FIELD_KEYS.map(f =>
                 `${STAFFING_LABELS[f]}: ${cols[f] != null ? 'столбец ' + cols[f] : '<span class="muted">не найден</span>'}`).join(' · ');
             const head = STAFFING_FIELD_KEYS.map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('') + '<th></th>';
@@ -1710,6 +1720,16 @@
                 employeesCache = d.users || [];
                 renderEmployees(employeesCache);
             }).catch(() => {});
+        }
+
+        function deleteNonAdmins() {
+            if (!confirm('Удалить ВСЕХ пользователей, кроме администраторов? Профили и доступы будут удалены безвозвратно.')) return;
+            if (!confirm('Точно удалить всех сотрудников? Действие необратимо.')) return;
+            apiJson('/users/delete-non-admins', { method: 'POST' }).then(({ ok, data }) => {
+                if (!ok) { alert(data.detail || 'Не удалось удалить (нужны права главного администратора).'); return; }
+                alert(`Удалено пользователей: ${data.deleted}.`);
+                loadEmployees();
+            }).catch(err => alert('Ошибка: ' + err.message));
         }
 
         // ---- Combobox с поиском: клик по полю -> скроллируемый список + строка поиска ----

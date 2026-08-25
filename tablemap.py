@@ -70,7 +70,22 @@ MAP_SYSTEM = """Ты — парсер табличных выгрузок. Те�
 Ответ — СТРОГО JSON без пояснений:
 {"data_start_row": <int>, "columns": {"<поле>": <индекс столбца или null>, ...},
  "sections": {"<поле>": <индекс столбца баннера>, ...}}
-Поля, значение которых берётся из обычного столбца в каждой строке, в "sections" не включай."""
+Поля, значение которых берётся из обычного столбца в каждой строке, в "sections" не включай.
+
+ПРИМЕР. Таблица:
+строка 8: [0]Подразделение
+строка 9: [0]№ | [1]Сотрудник | [6]Табельный номер | [17]Должность | [25]Дата приема
+строка 10: [0]Администрация
+строка 11: [0]1 | [1]Иванов Иван | [6]00246 | [17]Бухгалтер | [25]06.02.2026
+строка 12: [0]2 | [1]Петров Пётр | [6]00110 | [17]Кассир | [25]01.02.2023
+строка 13: [0]Отдел продаж
+строка 14: [0]1 | [1]Сидоров Сидор | [6]00022 | [17]Менеджер | [25]06.03.2020
+Желаемые поля: full_name, position, department, tab_number, start_date.
+Правильный ответ:
+{"data_start_row": 10, "columns": {"full_name": 1, "position": 17, "department": null, "tab_number": 6, "start_date": 25}, "sections": {"department": 0}}
+Почему: строка 9 — ЗАГОЛОВОК (не данные, в записи не попадает). Строки 10 и 13 — БАННЕРЫ
+отдела (заполнен только столбец 0, ФИО пустое), поэтому department — это СЕКЦИЯ со столбцом 0,
+а НЕ обычный столбец. data_start_row = 10 (первый баннер), чтобы захватить все группы."""
 
 
 def _grid_preview(grid: list, rows: int = SAMPLE_ROWS) -> str:
@@ -104,6 +119,12 @@ def map_columns(grid: list, target_fields: list) -> dict:
     return {"data_start_row": int(data.get("data_start_row") or 0), "columns": clean, "sections": sections}
 
 
+# Слова-заголовки: если «значение» ключевого поля равно одному из них — это строка шапки,
+# а не данные (страховка, если модель ошиблась с data_start_row).
+_HEADER_WORDS = {"сотрудник", "фио", "ф.и.о.", "ф. и. о.", "работник", "наименование",
+                 "имя", "должность", "№", "n", "no", "п/п", "№ п/п"}
+
+
 def extract_records(grid: list, mapping: dict, required: Optional[list] = None) -> list:
     """Извлечь записи по найденной разметке — чистая функция без ИИ.
     mapping — результат map_columns. required — поля, без которых строка пропускается
@@ -127,6 +148,9 @@ def extract_records(grid: list, mapping: dict, required: Optional[list] = None) 
                 v = cval(row, scol)
                 if v:
                     carried[name] = v
+            continue
+        # страховка от попавшей в данные строки-шапки: ключевое поле = слово-заголовок
+        if any(cval(row, columns.get(k)).strip().lower() in _HEADER_WORDS for k in required):
             continue
         rec = {name: cval(row, col) for name, col in columns.items()}
         for name in sections:

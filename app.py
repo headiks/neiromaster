@@ -563,6 +563,20 @@ async def staffing_import(req: StaffingImportRequest):
     return staffing.import_records(req.records or [])
 
 
+@app.post("/users/delete-non-admins", dependencies=owner_only)
+async def delete_non_admins():
+    """Удаляет ВСЕХ пользователей, кроме администраторов (владелец и админы остаются).
+    Необратимо — только для главного администратора. Заодно чистит строки рассылки."""
+    deleted = 0
+    for u in users.list_users():
+        if u.get("role") in users.ADMIN_ROLES:
+            continue
+        if users.delete_user(u["id"]):
+            mailing.remove(u["id"])
+            deleted += 1
+    return {"deleted": deleted}
+
+
 @app.get("/documents/jobs/{job_id}", dependencies=admin_only)
 async def get_document_job(job_id: str):
     """Статус фоновой индексации загруженного документа."""
