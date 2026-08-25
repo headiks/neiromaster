@@ -107,7 +107,11 @@ def map_columns(grid: list, target_fields: list) -> dict:
     names = [f["name"] for f in target_fields]
     fields_txt = "\n".join(f"- {f['name']}: {f.get('description', '')}" for f in target_fields)
     user = f"Желаемые поля:\n{fields_txt}\n\nПервые строки таблицы:\n{_grid_preview(grid)}"
-    data = _parse_json(_llm(MAP_SYSTEM, user))
+    try:
+        data = _parse_json(_llm(MAP_SYSTEM, user))
+    except (ValueError, json.JSONDecodeError):
+        # модель ответила прозой — просим ещё раз строго JSON
+        data = _parse_json(_llm(MAP_SYSTEM, user + "\n\nВЕРНИ ТОЛЬКО JSON, без слов."))
     cols = data.get("columns") or {}
     secs = data.get("sections") or {}
     # оставляем только запрошенные поля; приводим индексы к int или None

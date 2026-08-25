@@ -1,34 +1,41 @@
 """
 staffing.py — импорт штатного расписания в профили сотрудников.
 
-Штатка первична: из неё берутся ЛЮДИ и их ДОЛЖНОСТИ, на которых строится всё
-остальное. Разбор произвольной xlsx-выгрузки делает переиспользуемый tablemap
-(ИИ определяет, какой столбец какому полю соответствует). Здесь — только знание
-о нужных полях и создание аккаунтов.
+Единый вывод для ЛЮБОГО файла — ровно четыре поля: ФИО, Должность, Отдел, Дата
+приёма/выхода. Именно эта таблица показывается в превью и заполняется. Никаких других
+столбцов.
 
-Аккаунту проставляем ФИО, должность и отдел. Табельный номер и дату приёма показываем
-в превью, но в профиль НЕ пишем: «дата приёма» из штатки — это не «дата выхода на
-работу», по которой считается расписание адаптации (её админ задаёт отдельно).
+Разбор произвольной таблицы: tablemap (ИИ определяет, где какие столбцы). Плюс
+ПОСТРОЧНАЯ классификация малой моделью: в реальных ШР должности и названия
+подразделений идут в ОДНОМ столбце вперемешку (баннер «Обособленное подразделение …»,
+затем должности под ним) — по столбцам это не разделить. Малая модель на каждую
+неоднозначную строку решает: это ПОДРАЗДЕЛЕНИЕ (баннер, протягивается в «Отдел») или
+ДОЛЖНОСТЬ/человек (строка данных). Результат кэшируется по тексту — вызовов немного.
 
-Логины — транслит ФИО (ivanov_i_i), при коллизии с числом. Пароль — временный,
-случайный; сотрудник меняет его при первом входе (must_change_credentials).
+Импорт: если у строки есть настоящее ФИО — создаётся профиль сотрудника (логин по ФИО,
+временный пароль). Если ФИО нет (штатное расписание должностей) — профиль-вакансия
+«(вакансия) <должность>» без логина.
 """
 
 import re
 import secrets
-import string
+
+import requests
 
 import tablemap
 import users
+from config import OLLAMA_URL
 
-# Поля, которые вытаскиваем из штатки. description — подсказка модели для разметки.
-STAFFING_FIELDS = [
-    {"name": "full_name",  "description": "ФИО сотрудника: фамилия, имя, отчество"},
-    {"name": "position",   "description": "должность"},
-    {"name": "department", "description": "отдел, подразделение или цех"},
-    {"name": "tab_number", "description": "табельный номер (только для справки)"},
-    {"name": "start_date", "description": "дата приёма на работу (только для справки)"},
+# Единая выходная схема — 4 поля, и только они.
+UNIFIED_FIELDS = [
+    {"name": "full_name",  "description": "ФИО человека: фамилия имя отчество (если в файле есть люди)"},
+    {"name": "position",   "description": "должность/профессия"},
+    {"name": "department", "description": "подразделение/отдел; часто отдельная строка-баннер над блоком"},
+    {"name": "start_date", "description": "дата приёма или выхода на работу"},
 ]
+FIELD_KEYS = ["full_name", "position", "department", "start_date"]
+
+SMALL_MODEL = "qwen2.5:3b"
 
 _TRANSLIT = str.maketrans({
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
@@ -37,13 +44,21 @@ _TRANSLIT = str.maketrans({
     "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
 })
 
+_HEADER_WORDS = {"сотрудник", "фио", "ф.и.о.", "работник", "наименование", "имя",
+                 "должность", "№", "n", "no", "п/п", "№ п/п", "итого", "всего"}
 
+# Сильные признаки названия подразделения — без модели (экономим вызовы и повышаем точность).
+_ORG_HINTS = ("подразделение", "департамент", "управление", "дирекция", "служба",
+              "цех", "участок", "сектор", "бюро", "администрация", "бухгалтери")
+
+
+# ---------- Логины/пароли ----------
 def _translit(word: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (word or "").lower().translate(_TRANSLIT))
 
 
 def username_base(full_name: str) -> str:
-    """«Иванов Иван Иванович» -> «ivanov_i_i». Фамилия + инициалы. Гарантируем длину >= 3."""
+    """«Иванов Иван Иванович» -> «ivanov_i_i». Фамилия + инициалы, длина >= 3."""
     parts = [p for p in re.split(r"\s+", (full_name or "").strip()) if p]
     if not parts:
         return "user"
@@ -66,23 +81,8 @@ def _unique_username(base: str, taken: set) -> str:
 
 
 def _temp_password(length: int = 10) -> str:
-    # Без похожих символов (0/O, 1/l/I) — временный пароль иногда вводят вручную.
     alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
-# Поля для штатного расписания БЕЗ людей (список должностей по подразделениям).
-# Дискриминатор строки-должности — число ставок (у строк-баннеров подразделений его нет).
-POSITION_FIELDS = [
-    {"name": "position",   "description": "должность (наименование штатной позиции)"},
-    {"name": "department", "description": "подразделение/отдел; обычно строка-баннер над должностями"},
-    {"name": "count",      "description": "количество штатных единиц/ставок именно у этой должности (число в строке должности, НЕ суммарное у подразделения)"},
-]
-
-
-def parse(grid: list) -> dict:
-    """Разметка штатки моделью + извлечение записей. {"mapping": {...}, "records": [...]}"""
-    return tablemap.normalize_table(grid, STAFFING_FIELDS, required=["full_name"])
 
 
 def _looks_like_name(s: str) -> bool:
@@ -91,77 +91,146 @@ def _looks_like_name(s: str) -> bool:
     return bool(s) and " " in s and len(s) >= 5 and not any(ch.isdigit() for ch in s)
 
 
-def _is_roster(records: list) -> bool:
-    """Список людей, если у большинства записей ФИО похоже на настоящее имя."""
-    names = [r.get("full_name", "") for r in records]
-    good = sum(1 for n in names if _looks_like_name(n))
-    return bool(names) and good >= max(1, len(names) * 0.5)
+# ---------- Построчная классификация «подразделение / должность» ----------
+UNIT_SYSTEM = """Определи, чем является строка штатного расписания. Ответь ОДНИМ словом:
+«подразделение» — если это название организационной единицы (отдел, департамент,
+управление, служба, цех, участок, обособленное подразделение, администрация, бухгалтерия);
+«должность» — если это наименование должности/профессии человека;
+«другое» — если ни то, ни другое (шапка, итог, примечание). Только одно слово, без пояснений."""
 
 
-def parse_file(source, filename: str = None) -> dict:
-    """Разбор xlsx/xls/csv. Определяет тип документа:
-      mode=roster   — список сотрудников (есть ФИО) -> профили;
-      mode=schedule — штатное расписание должностей (ФИО нет) -> вакансии.
-    Возвращает {"mode", "mapping", "records", "count"}."""
-    grid = tablemap.read_table_grid(source, filename)
-    roster = parse(grid)
-    if _is_roster(roster["records"]):
-        return {"mode": "roster", **roster, "count": len(roster["records"])}
-    schedule = tablemap.normalize_table(grid, POSITION_FIELDS, required=["count"])
-    return {"mode": "schedule", **schedule, "count": len(schedule["records"])}
+def _classify_unit_llm(text: str) -> str:
+    try:
+        r = requests.post(f"{OLLAMA_URL}/api/chat", json={
+            "model": SMALL_MODEL,
+            "messages": [{"role": "system", "content": UNIT_SYSTEM}, {"role": "user", "content": text[:200]}],
+            "stream": False, "think": False,
+        }, timeout=60)
+        r.raise_for_status()
+        ans = r.json()["message"]["content"].strip().lower()
+    except Exception:
+        ans = ""
+    if "подразделен" in ans or "отдел" in ans:
+        return "org"
+    if "должност" in ans or "професс" in ans:
+        return "job"
+    return "other"
 
 
-def import_vacancies(records: list) -> dict:
-    """Создаёт профили-вакансии из строк расписания должностей (по одной на позицию,
-    без ФИО и без логина). Число ставок сохраняем в примечании. Возвращает сводку."""
-    created = []
-    for rec in records:
-        position = (rec.get("position") or "").strip()
-        if not position:
+def make_unit_classifier(llm=_classify_unit_llm):
+    """Классификатор текста строки с кэшем и быстрым путём по ключевым словам."""
+    cache = {}
+
+    def classify(text: str) -> str:
+        t = (text or "").strip()
+        if not t:
+            return "other"
+        if t in cache:
+            return cache[t]
+        low = t.lower()
+        role = "org" if any(h in low for h in _ORG_HINTS) else llm(t)
+        cache[t] = role
+        return role
+
+    return classify
+
+
+# ---------- Разбор в единую схему ----------
+def _cell(row, col):
+    return (row[col].strip() if (col is not None and col < len(row) and row[col] is not None) else "")
+
+
+def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
+    """Единые записи [{full_name, position, department, start_date}]. Отдел протягивается
+    из строк-баннеров-подразделений. Неоднозначные строки (должность/подразделение в одном
+    столбце) разбирает classifier."""
+    classifier = classifier or make_unit_classifier()
+    cols = mapping.get("columns") or {}
+    sections = mapping.get("sections") or {}
+    start = mapping.get("data_start_row") or 0
+    name_c, pos_c, date_c = cols.get("full_name"), cols.get("position"), cols.get("start_date")
+    dept_c = cols.get("department")
+    dept_sec = sections.get("department", dept_c if dept_c is not None else None)
+
+    carried_dept = ""
+    records = []
+    for row in grid[start:]:
+        name = _cell(row, name_c)
+        pos = _cell(row, pos_c)
+        date = _cell(row, date_c)
+        dept_col_val = _cell(row, dept_c) if (dept_c is not None and dept_c != pos_c) else ""
+        sec_val = _cell(row, dept_sec) if dept_sec is not None else ""
+
+        key = (name or pos or sec_val).strip().lower()
+        if key in _HEADER_WORDS:
             continue
-        department = (rec.get("department") or "").strip()
-        count = (rec.get("count") or "").strip()
-        users.create_user(
-            {"full_name": f"(вакансия) {position}", "position": position,
-             "department": department, "notes": f"Вакансия из штатного расписания. Ставок: {count or '—'}."},
-            role=users.ROLE_EMPLOYEE,
-        )   # без username/password — плейсхолдер, заполняется позже
-        created.append({"position": position, "department": department, "count": count})
-    return {"created": created}
+        if _looks_like_name(name):
+            # отдел — из отдельной колонки отдела либо протянутый из баннера (НЕ из sec_val
+            # текущей строки: там, где баннер = столбец №, на строках данных стоит номер)
+            records.append({"full_name": name, "position": pos,
+                            "department": dept_col_val or carried_dept, "start_date": date})
+            continue
+        # ФИО нет: решаем — подразделение (баннер) или должность (вакансия) или мусор
+        text = pos or sec_val or name
+        if not text:
+            continue
+        role = classifier(text)
+        if role == "org":
+            carried_dept = text
+            continue
+        if role == "job":
+            records.append({"full_name": "", "position": text,
+                            "department": dept_col_val or carried_dept, "start_date": date})
+        # role == other -> пропускаем
+    return records
 
 
+def parse_file(source, filename: str = None, classifier=None) -> dict:
+    """Разбор xlsx/xls/csv -> {"mapping", "records"} в единой схеме (4 поля)."""
+    grid = tablemap.read_table_grid(source, filename)
+    mapping = tablemap.map_columns(grid, UNIFIED_FIELDS)
+    records = extract_unified(grid, mapping, classifier)
+    return {"mapping": mapping, "records": records, "count": len(records)}
+
+
+# ---------- Создание профилей/вакансий ----------
 def import_records(records: list) -> dict:
-    """Массово создаёт профили сотрудников из разобранных строк штатки.
-    Возвращает {"created": [{full_name, username, password, position}], "skipped": [...]}.
-    Пароли в ответе показываются один раз — для выгрузки администратору."""
+    """Строки с ФИО -> профили сотрудников (логин/пароль в ответе, один раз).
+    Строки без ФИО -> профили-вакансии «(вакансия) <должность>» без логина.
+    Возвращает {"profiles": [...], "vacancies": [...], "skipped": [...]}."""
     existing = users.list_users()
     taken = {u["username"] for u in existing if u.get("username")}
-    seen_names = {(u.get("full_name") or "").strip().lower() for u in existing if u.get("full_name")}
+    seen = {(u.get("full_name") or "").strip().lower() for u in existing if u.get("full_name")}
 
-    created, skipped = [], []
+    profiles, vacancies, skipped = [], [], []
     for rec in records:
-        full_name = (rec.get("full_name") or "").strip()
-        if not full_name:
-            continue
-        key = full_name.lower()
-        if key in seen_names:
-            skipped.append({"full_name": full_name, "reason": "уже есть в системе"})
-            continue
+        name = (rec.get("full_name") or "").strip()
+        position = (rec.get("position") or "").strip()
+        department = (rec.get("department") or "").strip()
+        date = (rec.get("start_date") or "").strip()
 
-        username = _unique_username(username_base(full_name), taken)
-        password = _temp_password()
-        try:
+        if _looks_like_name(name):
+            if name.lower() in seen:
+                skipped.append({"full_name": name, "reason": "уже есть"})
+                continue
+            username = _unique_username(username_base(name), taken)
+            password = _temp_password()
+            try:
+                users.create_user(
+                    {"username": username, "password": password, "full_name": name,
+                     "position": position, "department": department, "start_date": date or None},
+                    role=users.ROLE_EMPLOYEE, must_change_credentials=True)
+            except ValueError as e:
+                skipped.append({"full_name": name, "reason": str(e)})
+                continue
+            taken.add(username)
+            seen.add(name.lower())
+            profiles.append({"full_name": name, "username": username,
+                             "password": password, "position": position})
+        elif position:
             users.create_user(
-                {"username": username, "password": password, "full_name": full_name,
-                 "position": (rec.get("position") or "").strip(),
-                 "department": (rec.get("department") or "").strip()},
-                role=users.ROLE_EMPLOYEE, must_change_credentials=True,
-            )
-        except ValueError as e:
-            skipped.append({"full_name": full_name, "reason": str(e)})
-            continue
-        taken.add(username)
-        seen_names.add(key)
-        created.append({"full_name": full_name, "username": username,
-                        "password": password, "position": (rec.get("position") or "").strip()})
-    return {"created": created, "skipped": skipped}
+                {"full_name": f"(вакансия) {position}", "position": position,
+                 "department": department, "notes": "Вакансия из штатного расписания."},
+                role=users.ROLE_EMPLOYEE)
+            vacancies.append({"position": position, "department": department})
+    return {"profiles": profiles, "vacancies": vacancies, "skipped": skipped}
