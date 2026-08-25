@@ -65,8 +65,11 @@ def test_classify_pure():
 def test_seed_integrity():
     seed = json.loads((pathlib.Path(__file__).parent / "data" / "knowledge_seed.json")
                       .read_text(encoding="utf-8"))
-    assert len(seed["stages"]) == 5
-    assert len(seed["folders"]) == 11
+    assert len(seed["stages"]) == 8       # блоки из «Блоки и модули»
+    assert len(seed["folders"]) == 125    # документы из «Сортировка документов»
+    # у каждого блока есть модули (подэтапы)
+    for s in seed["stages"]:
+        assert s["substages"], s["id"]
     # каждая папка имеет критерии и связана хотя бы с одним этапом
     for f in seed["folders"]:
         assert f["criteria"], f["name"]
