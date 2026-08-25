@@ -467,7 +467,8 @@ def ask(req: QuestionRequest, user: dict = Depends(require_setup_done)):
     history = get_recent_history(session_id)
 
     try:
-        result = handle_question(question, history=history, current_stage_ids=_current_stage_ids(user))
+        result = handle_question(question, history=history, current_stage_ids=_current_stage_ids(user),
+                                 position=user.get("position"))
         result = _route_to_human(result, user)
         result["elapsed_time"] = time.time() - start
         result["session_id"] = session_id
