@@ -1,23 +1,24 @@
 """
-staffing.py — импорт штатного расписания в профили сотрудников.
+staffing.py — импорт любой таблицы штатки/штатного расписания в профили сотрудников.
 
 Единый вывод для ЛЮБОГО файла — ровно четыре поля: ФИО, Должность, Отдел, Дата
-приёма/выхода. Именно эта таблица показывается в превью и заполняется. Никаких других
-столбцов.
+приёма/выхода. Никаких других столбцов.
 
-Разбор произвольной таблицы: tablemap (ИИ определяет, где какие столбцы). Плюс
-ПОСТРОЧНАЯ классификация малой моделью: в реальных ШР должности и названия
-подразделений идут в ОДНОМ столбце вперемешку (баннер «Обособленное подразделение …»,
-затем должности под ним) — по столбцам это не разделить. Малая модель на каждую
-неоднозначную строку решает: это ПОДРАЗДЕЛЕНИЕ (баннер, протягивается в «Отдел») или
-ДОЛЖНОСТЬ/человек (строка данных). Результат кэшируется по тексту — вызовов немного.
+Подход УНИВЕРСАЛЬНЫЙ, не заточен под конкретные файлы: столбцы определяет модель
+(tablemap), а маршрут каждой строки строится по СМЫСЛУ ячейки. Каждую значимую ячейку
+малая модель классифицирует в один из классов:
+  person   — ФИО человека        -> строка данных, профиль сотрудника;
+  position — должность/профессия  -> строка данных, профиль-вакансия (ФИО заполнят позже);
+  org      — подразделение/отдел  -> строка-баннер, значение протягивается в «Отдел»;
+  other    — прочее (шапка, итог, число, дата, примечание) -> пропускается.
+Классификация идёт БАТЧАМИ (по десяткам уникальных ячеек за один запрос) — быстро и
+не зависит от языка/словарей. Никаких жёстко зашитых списков должностей/подразделений.
 
-Импорт: если у строки есть настоящее ФИО — создаётся профиль сотрудника (логин по ФИО,
-временный пароль). Если ФИО нет (штатное расписание должностей) — профиль-вакансия
-«(вакансия) <должность>» без логина.
+Импорт: строка с ФИО -> профиль (логин по ФИО, временный пароль); без ФИО -> вакансия.
 """
 
 import re
+import json
 import secrets
 
 import requests
@@ -36,6 +37,7 @@ UNIFIED_FIELDS = [
 FIELD_KEYS = ["full_name", "position", "department", "start_date"]
 
 SMALL_MODEL = "qwen2.5:3b"
+BATCH_SIZE = 40
 
 _TRANSLIT = str.maketrans({
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
@@ -43,13 +45,6 @@ _TRANSLIT = str.maketrans({
     "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c",
     "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
 })
-
-_HEADER_WORDS = {"сотрудник", "фио", "ф.и.о.", "работник", "наименование", "имя",
-                 "должность", "№", "n", "no", "п/п", "№ п/п", "итого", "всего"}
-
-# Сильные признаки названия подразделения — без модели (экономим вызовы и повышаем точность).
-_ORG_HINTS = ("подразделение", "департамент", "управление", "дирекция", "служба",
-              "цех", "участок", "сектор", "бюро", "администрация", "бухгалтери")
 
 
 # ---------- Логины/пароли ----------
@@ -85,70 +80,58 @@ def _temp_password(length: int = 10) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-_PATRONYMIC = ("вич", "вна", "ична", "оглы", "кызы", "угли", "уулу")
-_STOP = {"по", "и", "на", "в", "с", "для", "отдела", "отдел", "участка", "службы", "работ"}
+# ---------- Классификация ячеек малой моделью (батчами) ----------
+CLASSES = ("person", "position", "org", "other")
+
+BATCH_SYSTEM = """Ты классифицируешь ячейки таблицы штатного расписания. Для каждого
+пронумерованного элемента верни ОДИН класс:
+person — ФИО человека (имя/фамилия/отчество конкретного человека);
+position — должность или профессия;
+org — организационная единица (подразделение, отдел, департамент, служба, цех, организация);
+other — всё прочее (заголовок столбца, итог, число, дата, код, примечание).
+Верни ТОЛЬКО JSON-массив строк той же длины и в том же порядке, например:
+["person","org","position","other"]. Без пояснений."""
 
 
-def _looks_like_name(s: str) -> bool:
-    """Похоже на ФИО, а не на должность/подразделение. Настоящее ФИО: без цифр, не
-    орг-единица, и либо есть отчество (…вич/…вна/…кызы), либо 3+ слов с заглавной без
-    служебных слов. Двухсловные должности («Главный геолог») сюда НЕ проходят."""
-    s = (s or "").strip()
-    if not s or any(ch.isdigit() for ch in s):
-        return False
-    low = s.lower()
-    if any(h in low for h in _ORG_HINTS):
-        return False
-    toks = s.split()
-    if len(toks) < 2:
-        return False
-    if any(t.lower().endswith(p) for p in _PATRONYMIC for t in toks):
-        return True
-    return len(toks) >= 3 and all(t[:1].isupper() for t in toks) and not any(t.lower() in _STOP for t in toks)
+def _small_llm(system: str, user: str) -> str:
+    r = requests.post(f"{OLLAMA_URL}/api/chat", json={
+        "model": SMALL_MODEL,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "stream": False, "think": False,
+    }, timeout=120)
+    r.raise_for_status()
+    return r.json()["message"]["content"].strip()
 
 
-# ---------- Построчная классификация «подразделение / должность» ----------
-UNIT_SYSTEM = """Определи, чем является строка штатного расписания. Ответь ОДНИМ словом:
-«подразделение» — если это название организационной единицы (отдел, департамент,
-управление, служба, цех, участок, обособленное подразделение, администрация, бухгалтерия);
-«должность» — если это наименование должности/профессии человека;
-«другое» — если ни то, ни другое (шапка, итог, примечание). Только одно слово, без пояснений."""
+def _parse_labels(text: str, n: int) -> list:
+    text = re.sub(r"```json\s*|```", "", text)
+    i = text.find("[")
+    if i == -1:
+        raise ValueError("нет JSON-массива")
+    arr, _ = json.JSONDecoder().raw_decode(text[i:])
+    return [x if x in CLASSES else "other" for x in arr][:n]
 
 
-def _classify_unit_llm(text: str) -> str:
+def _classify_batch(chunk: list) -> dict:
+    """Классифицирует список текстов -> {текст: класс}. При сбое модели — деградация в
+    'position' (получаем вакансии, но не выдаём мусор за людей)."""
+    body = "\n".join(f"{i + 1}. {t[:120]}" for i, t in enumerate(chunk))
     try:
-        r = requests.post(f"{OLLAMA_URL}/api/chat", json={
-            "model": SMALL_MODEL,
-            "messages": [{"role": "system", "content": UNIT_SYSTEM}, {"role": "user", "content": text[:200]}],
-            "stream": False, "think": False,
-        }, timeout=60)
-        r.raise_for_status()
-        ans = r.json()["message"]["content"].strip().lower()
+        labels = _parse_labels(_small_llm(BATCH_SYSTEM, body), len(chunk))
     except Exception:
-        ans = ""
-    if "подразделен" in ans or "отдел" in ans:
-        return "org"
-    if "должност" in ans or "професс" in ans:
-        return "job"
-    return "other"
+        return {t: "position" for t in chunk}
+    return {t: (labels[i] if i < len(labels) else "other") for i, t in enumerate(chunk)}
 
 
-def make_unit_classifier(llm=_classify_unit_llm):
-    """Классификатор текста строки с кэшем и быстрым путём по ключевым словам."""
-    cache = {}
-
-    def classify(text: str) -> str:
-        t = (text or "").strip()
-        if not t:
-            return "other"
-        if t in cache:
-            return cache[t]
-        low = t.lower()
-        role = "org" if any(h in low for h in _ORG_HINTS) else llm(t)
-        cache[t] = role
-        return role
-
-    return classify
+def classify_cells(texts, classifier=None) -> dict:
+    """Классы для набора уникальных текстов. classifier(chunk)->{text:class} можно
+    подменить в тестах."""
+    classifier = classifier or _classify_batch
+    uniq = sorted({(t or "").strip() for t in texts if (t or "").strip()})
+    out = {}
+    for i in range(0, len(uniq), BATCH_SIZE):
+        out.update(classifier(uniq[i:i + BATCH_SIZE]))
+    return out
 
 
 # ---------- Разбор в единую схему ----------
@@ -157,71 +140,70 @@ def _cell(row, col):
 
 
 def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
-    """Единые записи [{full_name, position, department, start_date}]. Отдел протягивается
-    из строк-баннеров-подразделений. Неоднозначные строки (должность/подразделение в одном
-    столбце) разбирает classifier."""
-    classifier = classifier or make_unit_classifier()
+    """Единые записи [{full_name, position, department, start_date}]. Маршрут строки — по
+    КЛАССУ её значимых ячеек (ФИО-колонка, должность-колонка, баннер-колонка), а не по тому,
+    как модель угадала назначение столбца. Отдел протягивается из строк-баннеров (org)."""
     cols = mapping.get("columns") or {}
     sections = mapping.get("sections") or {}
     start = mapping.get("data_start_row") or 0
     name_c, pos_c, date_c = cols.get("full_name"), cols.get("position"), cols.get("start_date")
     dept_c = cols.get("department")
     dept_sec = sections.get("department", dept_c if dept_c is not None else None)
+    rows = grid[start:]
 
-    carried_dept = ""
-    records = []
-    for row in grid[start:]:
-        name = _cell(row, name_c)
-        pos = _cell(row, pos_c)
+    def cells(row):
+        nm = _cell(row, name_c)
+        ps = _cell(row, pos_c)
+        sv = _cell(row, dept_sec) if dept_sec is not None else ""
+        return nm, ps, sv
+
+    # собираем все значимые тексты и классифицируем одним проходом (батчами)
+    texts = set()
+    for row in rows:
+        texts.update(cells(row))
+    labels = classify_cells(texts, classifier)
+
+    def lab(t):
+        return labels.get((t or "").strip()) if (t or "").strip() else None
+
+    carried = ""
+    out = []
+    for row in rows:
+        nm, ps, sv = cells(row)
         date = _cell(row, date_c)
-        dept_col_val = _cell(row, dept_c) if (dept_c is not None and dept_c != pos_c) else ""
-        sec_val = _cell(row, dept_sec) if dept_sec is not None else ""
+        dept_col = _cell(row, dept_c) if (dept_c is not None and dept_c not in (pos_c, name_c)) else ""
+        nr, pr, sr = lab(nm), lab(ps), lab(sv)
 
-        key = (name or pos or sec_val).strip().lower()
-        if key in _HEADER_WORDS:
+        if nr == "person":
+            position = ps if (ps and pr != "org") else ""
+            out.append({"full_name": nm, "position": position,
+                        "department": dept_col or carried, "start_date": date})
             continue
-        if _looks_like_name(name):
-            # отдел — из отдельной колонки отдела либо протянутый из баннера (НЕ из sec_val
-            # текущей строки: там, где баннер = столбец №, на строках данных стоит номер)
-            records.append({"full_name": name, "position": pos,
-                            "department": dept_col_val or carried_dept, "start_date": date})
+        # баннеры-подразделения обновляют протягиваемый отдел
+        if nr == "org":
+            carried = nm
             continue
-        # ФИО нет: решаем — подразделение (баннер) или должность (вакансия) или мусор
-        text = pos or sec_val or name
-        if not text:
+        if pr == "org":
+            carried = ps
             continue
-        role = classifier(text)
-        if role == "org":
-            carried_dept = text
+        if sr == "org" and not nm and not ps:
+            carried = sv
             continue
-        if role == "job":
-            records.append({"full_name": "", "position": text,
-                            "department": dept_col_val or carried_dept, "start_date": date})
-        # role == other -> пропускаем
-    return records
-
-
-def _repair_mapping(grid: list, mapping: dict) -> None:
-    """Если модель отнесла к ФИО столбец, где на деле почти нет настоящих имён (должности/
-    подразделения), — снимаем ФИО и используем этот столбец как источник должности."""
-    cols = mapping.get("columns") or {}
-    fn = cols.get("full_name")
-    if fn is None:
-        return
-    start = mapping.get("data_start_row") or 0
-    vals = [_cell(row, fn) for row in grid[start:start + 40]]
-    vals = [v for v in vals if v]
-    if vals and sum(1 for v in vals if _looks_like_name(v)) < len(vals) * 0.3:
-        if cols.get("position") is None:
-            cols["position"] = fn
-        cols["full_name"] = None
+        # должности -> вакансия (ФИО пустое); берём ту ячейку, которую модель назвала должностью
+        if nr == "position":
+            out.append({"full_name": "", "position": nm, "department": dept_col or carried, "start_date": date})
+            continue
+        if pr == "position":
+            out.append({"full_name": "", "position": ps, "department": dept_col or carried, "start_date": date})
+            continue
+        # other/пусто -> пропуск
+    return out
 
 
 def parse_file(source, filename: str = None, classifier=None) -> dict:
     """Разбор xlsx/xls/csv -> {"mapping", "records"} в единой схеме (4 поля)."""
     grid = tablemap.read_table_grid(source, filename)
     mapping = tablemap.map_columns(grid, UNIFIED_FIELDS)
-    _repair_mapping(grid, mapping)
     records = extract_unified(grid, mapping, classifier)
     return {"mapping": mapping, "records": records, "count": len(records)}
 
@@ -242,7 +224,7 @@ def import_records(records: list) -> dict:
         department = (rec.get("department") or "").strip()
         date = (rec.get("start_date") or "").strip()
 
-        if _looks_like_name(name):
+        if name:
             if name.lower() in seen:
                 skipped.append({"full_name": name, "reason": "уже есть"})
                 continue
