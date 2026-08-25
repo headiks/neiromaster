@@ -549,7 +549,7 @@ async def staffing_preview(file: UploadFile = File(...)):
         raise HTTPException(status_code=413,
                             detail=f"Файл превышает лимит {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ")
     try:
-        result = staffing.parse_xlsx(content)
+        result = staffing.parse_file(content, file.filename)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Не удалось разобрать таблицу: {e}")
     result["count"] = len(result.get("records") or [])

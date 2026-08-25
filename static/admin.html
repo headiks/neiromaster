@@ -330,9 +330,9 @@
             доступны в списке при заполнении карточек.
         </p>
         <div class="dropzone" id="staffing-dropzone">
-            <div><i data-lucide="file-spreadsheet" style="width:28px;height:28px;display:block;margin:0 auto 8px;color:var(--color-accent);"></i> Перетащите xlsx-штатку сюда или нажмите, чтобы выбрать файл</div>
-            <small>Формат .xlsx · ИИ сам определит, какой столбец какому полю соответствует</small>
-            <input type="file" id="staffing-file" accept=".xlsx">
+            <div><i data-lucide="file-spreadsheet" style="width:28px;height:28px;display:block;margin:0 auto 8px;color:var(--color-accent);"></i> Перетащите штатку (xlsx или csv) сюда или нажмите, чтобы выбрать файл</div>
+            <small>Форматы .xlsx, .csv · ИИ сам определит структуру таблицы и найдёт нужные данные</small>
+            <input type="file" id="staffing-file" accept=".xlsx,.csv,.tsv">
         </div>
         <div id="staffing-status" class="muted" style="margin-top:10px;color:#64748b;font-size:14px;"></div>
         <div id="staffing-preview"></div>

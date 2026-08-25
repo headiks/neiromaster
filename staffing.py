@@ -76,8 +76,9 @@ def parse(grid: list) -> dict:
     return tablemap.normalize_table(grid, STAFFING_FIELDS, required=["full_name"])
 
 
-def parse_xlsx(source) -> dict:
-    return parse(tablemap.read_xlsx_grid(source))
+def parse_file(source, filename: str = None) -> dict:
+    """Разбор xlsx или csv (по имени файла) в записи штатки."""
+    return parse(tablemap.read_table_grid(source, filename))
 
 
 def import_records(records: list) -> dict:
