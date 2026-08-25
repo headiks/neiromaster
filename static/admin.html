@@ -97,7 +97,7 @@
         }
         .dropzone.dragover { border-color: #3b82f6; background: #eff6ff; color: #1e40af; }
         .dropzone small { display: block; margin-top: 6px; color: #94a3b8; }
-        #file-input { display: none; }
+        #file-input, #staffing-file { display: none; }
         .doc-list { margin-top: 16px; }
         .doc-item {
             background: white;
@@ -236,6 +236,15 @@
         .tst { width: 100%; border-collapse: collapse; }
         .tst th, .tst td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }
         .tst th { background: #f1f5f9; }
+        .combo-panel { position: fixed; z-index: 1200; background: #fff; border: 1px solid #cbd5e1;
+            border-radius: 8px; box-shadow: 0 8px 24px rgba(15,23,42,0.15); display: none; }
+        .combo-panel.open { display: block; }
+        .combo-search { width: 100%; box-sizing: border-box; border: none; border-bottom: 1px solid #e2e8f0;
+            border-radius: 8px 8px 0 0; padding: 8px 10px; font-size: 14px; outline: none; }
+        .combo-list { list-style: none; margin: 0; padding: 4px; max-height: 220px; overflow-y: auto; }
+        .combo-list li { padding: 7px 9px; border-radius: 6px; cursor: pointer; font-size: 14px; color: #334155; }
+        .combo-list li:hover { background: #eff6ff; }
+        .combo-list li.empty { color: #94a3b8; cursor: default; }
         .progress-wrap { margin: 16px 0; }
         .progress-bar { height: 10px; background: #e2e8f0; border-radius: 6px; overflow: hidden; }
         .progress-bar > div { height: 100%; background: #3b82f6; width: 0; transition: width 0.3s; }
@@ -320,9 +329,10 @@
             пароль временный (сотрудник сменит при первом входе). Должности из штатки станут
             доступны в списке при заполнении карточек.
         </p>
-        <div class="add-row">
+        <div class="dropzone" id="staffing-dropzone">
+            <div><i data-lucide="file-spreadsheet" style="width:28px;height:28px;display:block;margin:0 auto 8px;color:var(--color-accent);"></i> Перетащите xlsx-штатку сюда или нажмите, чтобы выбрать файл</div>
+            <small>Формат .xlsx · ИИ сам определит, какой столбец какому полю соответствует</small>
             <input type="file" id="staffing-file" accept=".xlsx">
-            <button class="ghost-btn" onclick="staffingPreview()"><i data-lucide="scan-search"></i> Разобрать таблицу</button>
         </div>
         <div id="staffing-status" class="muted" style="margin-top:10px;color:#64748b;font-size:14px;"></div>
         <div id="staffing-preview"></div>
@@ -447,8 +457,7 @@
                 </div>
                 <div class="field">
                     <label>Должность</label>
-                    <input type="text" id="emp-position" list="dl-positions" placeholder="Начните вводить — выбор из штатки">
-                    <datalist id="dl-positions"></datalist>
+                    <input type="text" id="emp-position" autocomplete="off" placeholder="Нажмите — выбор из штатки или введите свою">
                 </div>
                 <div class="field">
                     <label>Подразделение</label>
@@ -473,13 +482,12 @@
                 </div>
                 <div class="field">
                     <label>Наставник</label>
-                    <input type="text" id="emp-mentor" list="dl-users" placeholder="Начните вводить ФИО — выбор из пользователей">
+                    <input type="text" id="emp-mentor" autocomplete="off" placeholder="Нажмите — выбор из сотрудников">
                 </div>
                 <div class="field">
                     <label>Руководитель</label>
-                    <input type="text" id="emp-manager" list="dl-users" placeholder="Начните вводить ФИО — выбор из пользователей">
+                    <input type="text" id="emp-manager" autocomplete="off" placeholder="Нажмите — выбор из сотрудников">
                 </div>
-                <datalist id="dl-users"></datalist>
                 <div class="field">
                     <label>Контакт сотрудника</label>
                     <input type="text" id="emp-contact" placeholder="телефон, telegram или email">
@@ -922,35 +930,52 @@
                                   tab_number: 'Табельный №', start_date: 'Дата приёма' };
         let staffingRecords = [];
 
-        function staffingPreview() {
-            const file = document.getElementById('staffing-file').files[0];
+        function staffingPreview(fileArg) {
+            const file = fileArg || document.getElementById('staffing-file').files[0];
             const status = document.getElementById('staffing-status');
             const preview = document.getElementById('staffing-preview');
             const result = document.getElementById('staffing-result');
             result.innerHTML = ''; preview.innerHTML = '';
             if (!file) { status.textContent = 'Выберите файл xlsx.'; return; }
-            status.textContent = 'ИИ разбирает таблицу…';
+            status.textContent = `ИИ разбирает «${file.name}»…`;
             const fd = new FormData(); fd.append('file', file);
             apiJson('/staffing/preview', { method: 'POST', body: fd })
                 .then(({ ok, data }) => {
                     if (!ok) { status.innerHTML = `<span class="err">${escapeHtml(data.detail || 'ошибка разбора')}</span>`; return; }
                     staffingRecords = data.records || [];
-                    status.textContent = `Найдено сотрудников: ${data.count}.`;
-                    const cols = (data.mapping || {}).columns || {};
-                    const mapLine = Object.keys(STAFFING_LABELS).map(f =>
-                        `${STAFFING_LABELS[f]}: ${cols[f] != null ? 'столбец ' + cols[f] : '<span class="muted">не найден</span>'}`
-                    ).join(' · ');
-                    const head = Object.keys(STAFFING_LABELS).map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('');
-                    const rows = staffingRecords.map(r =>
-                        `<tr>${Object.keys(STAFFING_LABELS).map(f => `<td>${escapeHtml(r[f] || '')}</td>`).join('')}</tr>`).join('');
-                    preview.innerHTML = `
-                        <div class="doc-meta" style="margin:12px 0;">Разметка: ${mapLine}</div>
-                        <div style="overflow-x:auto;"><table class="tst" style="width:100%;border-collapse:collapse;font-size:13px;">
-                            <thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>
-                        <button class="ghost-btn" style="margin-top:12px;" onclick="staffingImport()"><i data-lucide="user-plus"></i> Создать профили (${staffingRecords.length})</button>`;
-                    refreshIcons();
+                    status.textContent = `Найдено сотрудников: ${data.count}. Поля можно отредактировать перед созданием.`;
+                    window._staffingCols = (data.mapping || {}).columns || {};
+                    renderStaffingPreview(window._staffingCols);
                 })
                 .catch(err => { status.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`; });
+        }
+
+        const STAFFING_FIELD_KEYS = ['full_name', 'position', 'department', 'tab_number', 'start_date'];
+
+        function renderStaffingPreview(cols) {
+            const preview = document.getElementById('staffing-preview');
+            if (!staffingRecords.length) { preview.innerHTML = '<div class="empty-hint">В таблице не найдено сотрудников.</div>'; return; }
+            const mapLine = STAFFING_FIELD_KEYS.map(f =>
+                `${STAFFING_LABELS[f]}: ${cols[f] != null ? 'столбец ' + cols[f] : '<span class="muted">не найден</span>'}`).join(' · ');
+            const head = STAFFING_FIELD_KEYS.map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('') + '<th></th>';
+            const rows = staffingRecords.map((r, i) =>
+                `<tr>${STAFFING_FIELD_KEYS.map(f =>
+                    `<td><input type="text" style="width:100%;box-sizing:border-box;" value="${escapeHtml(r[f] || '')}"
+                          oninput="staffingRecords[${i}]['${f}']=this.value"></td>`).join('')}
+                 <td><button class="icon-btn danger" title="Убрать строку" onclick="staffingRemoveRow(${i})"><i data-lucide="x"></i></button></td></tr>`).join('');
+            preview.innerHTML = `
+                <div class="section-head-row" style="margin:14px 0 6px;">
+                    <div class="doc-meta">Разметка: ${mapLine}</div>
+                    <button class="ghost-btn" onclick="staffingImport()"><i data-lucide="user-plus"></i> Создать профили (<span id="staffing-count">${staffingRecords.length}</span>)</button>
+                </div>
+                <div style="overflow-x:auto;"><table class="tst" style="font-size:13px;">
+                    <thead><tr>${head}</tr></thead><tbody id="staffing-tbody">${rows}</tbody></table></div>`;
+            refreshIcons();
+        }
+
+        function staffingRemoveRow(i) {
+            staffingRecords.splice(i, 1);
+            renderStaffingPreview(window._staffingCols || {});
         }
 
         function staffingImport() {
@@ -980,6 +1005,18 @@
                 loadEmployees();
             }).catch(err => { status.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`; });
         }
+
+        // Dropzone штатки: клик выбирает файл, drag-n-drop роняет файл — сразу разбираем.
+        (function () {
+            const dz = document.getElementById('staffing-dropzone');
+            const inp = document.getElementById('staffing-file');
+            if (!dz || !inp) return;
+            dz.addEventListener('click', () => inp.click());
+            inp.addEventListener('change', () => { if (inp.files[0]) staffingPreview(inp.files[0]); });
+            ['dragenter', 'dragover'].forEach(evt => dz.addEventListener(evt, e => { e.preventDefault(); dz.classList.add('dragover'); }));
+            ['dragleave', 'drop'].forEach(evt => dz.addEventListener(evt, e => { e.preventDefault(); dz.classList.remove('dragover'); }));
+            dz.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) staffingPreview(f); });
+        })();
 
         function downloadStaffingCsv() {
             const created = window._staffingCreated || [];
@@ -1672,19 +1709,73 @@
             api('/users').then(r => r.json()).then(d => {
                 employeesCache = d.users || [];
                 renderEmployees(employeesCache);
-                populateDirectories(employeesCache);
             }).catch(() => {});
         }
 
-        // Дропдауны с поиском: должности из штатки (distinct position) и ФИО пользователей.
-        function populateDirectories(usersList) {
-            const positions = [...new Set(usersList.map(u => (u.position || '').trim()).filter(Boolean))].sort();
-            const names = [...new Set(usersList.map(u => (u.full_name || '').trim()).filter(Boolean))].sort();
-            const posDl = document.getElementById('dl-positions');
-            const usrDl = document.getElementById('dl-users');
-            if (posDl) posDl.innerHTML = positions.map(p => `<option value="${escapeHtml(p)}">`).join('');
-            if (usrDl) usrDl.innerHTML = names.map(n => `<option value="${escapeHtml(n)}">`).join('');
+        // ---- Combobox с поиском: клик по полю -> скроллируемый список + строка поиска ----
+        function comboPositions() { return [...new Set(employeesCache.map(u => (u.position || '').trim()).filter(Boolean))].sort(); }
+        function comboUserNames() { return [...new Set(employeesCache.map(u => (u.full_name || '').trim()).filter(Boolean))].sort(); }
+
+        let comboTarget = null, comboAll = [];
+        function comboEls() {
+            let panel = document.getElementById('combo-panel');
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.className = 'combo-panel';
+                panel.id = 'combo-panel';
+                panel.innerHTML = `<input type="text" class="combo-search" id="combo-search" placeholder="Поиск…"><ul class="combo-list" id="combo-list"></ul>`;
+                document.body.appendChild(panel);
+                document.getElementById('combo-search').addEventListener('input', e => comboRender(e.target.value));
+                document.getElementById('combo-search').addEventListener('keydown', e => { if (e.key === 'Escape') comboClose(); });
+                document.addEventListener('mousedown', e => {
+                    if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== comboTarget) comboClose();
+                });
+            }
+            return panel;
         }
+        function comboRender(query) {
+            const q = (query || '').trim().toLowerCase();
+            const items = comboAll.filter(v => v.toLowerCase().includes(q));
+            const list = document.getElementById('combo-list');
+            list.innerHTML = '';
+            if (!items.length) { list.innerHTML = '<li class="empty">ничего не найдено</li>'; return; }
+            items.forEach(v => {
+                const li = document.createElement('li');
+                li.textContent = v;
+                li.addEventListener('mousedown', e => {
+                    e.preventDefault();
+                    if (comboTarget) { comboTarget.value = v; comboTarget.dispatchEvent(new Event('input')); }
+                    comboClose();
+                });
+                list.appendChild(li);
+            });
+        }
+        function comboOpen(input, items) {
+            const panel = comboEls();
+            comboTarget = input; comboAll = items;
+            const r = input.getBoundingClientRect();
+            panel.style.left = r.left + 'px';
+            panel.style.top = (r.bottom + 4) + 'px';
+            panel.style.width = Math.max(r.width, 240) + 'px';
+            const s = document.getElementById('combo-search');
+            s.value = '';
+            comboRender('');
+            panel.classList.add('open');
+            s.focus();
+        }
+        function comboClose() { const p = document.getElementById('combo-panel'); if (p) p.classList.remove('open'); comboTarget = null; }
+
+        // Привязка полей карточки к combobox (клик открывает список всех значений с поиском).
+        (function () {
+            const binds = { 'emp-position': comboPositions, 'emp-mentor': comboUserNames, 'emp-manager': comboUserNames };
+            Object.entries(binds).forEach(([id, provider]) => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener('focus', () => comboOpen(el, provider()));
+                    el.addEventListener('click', () => comboOpen(el, provider()));
+                }
+            });
+        })();
 
         function roleBadge(user) {
             const cls = user.role === 'employee' ? 'planned' : 'active';
