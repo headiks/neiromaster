@@ -538,7 +538,6 @@ async def upload_document(file: UploadFile = File(...)):
 # ---------- Штатное расписание (первичный инструмент: люди и должности) ----------
 class StaffingImportRequest(BaseModel):
     records: list = []
-    mode: str = "roster"
 
 
 @app.post("/staffing/preview", dependencies=admin_only)
@@ -559,10 +558,8 @@ async def staffing_preview(file: UploadFile = File(...)):
 
 @app.post("/staffing/import", dependencies=admin_only)
 async def staffing_import(req: StaffingImportRequest):
-    """Массовое создание из подтверждённых строк: mode=roster — профили сотрудников
-    (логины/пароли в ответе), mode=schedule — профили-вакансии из расписания должностей."""
-    if req.mode == "schedule":
-        return staffing.import_vacancies(req.records or [])
+    """Массовое создание из подтверждённых строк единой таблицы: строки с ФИО — профили
+    сотрудников (логины/пароли в ответе, один раз), строки без ФИО — профили-вакансии."""
     return staffing.import_records(req.records or [])
 
 

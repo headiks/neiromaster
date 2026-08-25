@@ -930,14 +930,9 @@
         }
 
         // ---------------- Штатное расписание ----------------
-        const STAFFING_LABELS = { full_name: 'ФИО', position: 'Должность', department: 'Отдел',
-                                  tab_number: 'Табельный №', start_date: 'Дата приёма', count: 'Ставок' };
-        const STAFFING_KEYS = {
-            roster: ['full_name', 'position', 'department', 'tab_number', 'start_date'],
-            schedule: ['position', 'department', 'count'],
-        };
+        const STAFFING_LABELS = { full_name: 'ФИО', position: 'Должность', department: 'Отдел', start_date: 'Дата приёма/выхода' };
+        const STAFFING_KEYS = ['full_name', 'position', 'department', 'start_date'];
         let staffingRecords = [];
-        let staffingMode = 'roster';
 
         function staffingPreview(fileArg) {
             const file = fileArg || document.getElementById('staffing-file').files[0];
@@ -952,9 +947,8 @@
                 .then(({ ok, data }) => {
                     if (!ok) { status.innerHTML = `<span class="err">${escapeHtml(data.detail || 'ошибка разбора')}</span>`; return; }
                     staffingRecords = data.records || [];
-                    staffingMode = data.mode || 'roster';
-                    const what = staffingMode === 'schedule' ? 'должностей (вакансий)' : 'сотрудников';
-                    status.textContent = `Тип: ${staffingMode === 'schedule' ? 'штатное расписание должностей' : 'список сотрудников'}. Найдено ${what}: ${data.count}. Поля можно отредактировать.`;
+                    const withName = staffingRecords.filter(r => (r.full_name || '').trim()).length;
+                    status.textContent = `Найдено строк: ${data.count} (с ФИО: ${withName}, вакансий: ${data.count - withName}). Поля можно отредактировать.`;
                     window._staffingCols = (data.mapping || {}).columns || {};
                     renderStaffingPreview(window._staffingCols);
                 })
@@ -963,27 +957,21 @@
 
         function renderStaffingPreview(cols) {
             const preview = document.getElementById('staffing-preview');
-            const keys = STAFFING_KEYS[staffingMode] || STAFFING_KEYS.roster;
             if (!staffingRecords.length) {
-                preview.innerHTML = '<div class="warn"><i data-lucide="triangle-alert"></i> В таблице не найдено ни сотрудников, ни должностей. Проверьте файл или поправьте вручную.</div>';
+                preview.innerHTML = '<div class="warn"><i data-lucide="triangle-alert"></i> В таблице не найдено данных. Проверьте файл или добавьте строки вручную.</div>';
                 refreshIcons();
                 return;
             }
-            const mapLine = keys.map(f =>
-                `${STAFFING_LABELS[f]}: ${cols[f] != null ? 'столбец ' + cols[f] : '<span class="muted">не найден/баннер</span>'}`).join(' · ');
-            const head = keys.map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('') + '<th></th>';
+            const head = STAFFING_KEYS.map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('') + '<th></th>';
             const rows = staffingRecords.map((r, i) =>
-                `<tr>${keys.map(f =>
+                `<tr>${STAFFING_KEYS.map(f =>
                     `<td><input type="text" style="width:100%;box-sizing:border-box;" value="${escapeHtml(r[f] || '')}"
                           oninput="staffingRecords[${i}]['${f}']=this.value"></td>`).join('')}
                  <td><button class="icon-btn danger" title="Убрать строку" onclick="staffingRemoveRow(${i})"><i data-lucide="x"></i></button></td></tr>`).join('');
-            const btnLabel = staffingMode === 'schedule'
-                ? `<i data-lucide="briefcase"></i> Создать вакансии (${staffingRecords.length})`
-                : `<i data-lucide="user-plus"></i> Создать профили (${staffingRecords.length})`;
             preview.innerHTML = `
                 <div class="section-head-row" style="margin:14px 0 6px;">
-                    <div class="doc-meta">Разметка: ${mapLine}</div>
-                    <button class="ghost-btn" onclick="staffingImport()">${btnLabel}</button>
+                    <div class="doc-meta muted">Строки с ФИО станут профилями, без ФИО — вакансиями.</div>
+                    <button class="ghost-btn" onclick="staffingImport()"><i data-lucide="user-plus"></i> Создать (${staffingRecords.length})</button>
                 </div>
                 <div style="overflow-x:auto;"><table class="tst" style="font-size:13px;">
                     <thead><tr>${head}</tr></thead><tbody id="staffing-tbody">${rows}</tbody></table></div>`;
@@ -997,42 +985,32 @@
 
         function staffingImport() {
             if (!staffingRecords.length) return;
-            const isSchedule = staffingMode === 'schedule';
-            const q = isSchedule
-                ? `Создать ${staffingRecords.length} профилей-вакансий (без ФИО и логина)?`
-                : `Создать ${staffingRecords.length} профилей? Существующие (по ФИО) будут пропущены.`;
-            if (!confirm(q)) return;
+            if (!confirm(`Создать ${staffingRecords.length} записей? Строки с ФИО — профили (существующие по ФИО пропускаются), без ФИО — вакансии.`)) return;
             const status = document.getElementById('staffing-status');
-            status.textContent = isSchedule ? 'Создаём вакансии…' : 'Создаём профили…';
+            status.textContent = 'Создаём…';
             apiJson('/staffing/import', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ records: staffingRecords, mode: staffingMode })
+                body: JSON.stringify({ records: staffingRecords })
             }).then(({ ok, data }) => {
                 if (!ok) { status.innerHTML = `<span class="err">${escapeHtml(data.detail || 'ошибка создания')}</span>`; return; }
-                if (isSchedule) {
-                    const created = data.created || [];
-                    status.textContent = `Создано вакансий: ${created.length}.`;
-                    const rows = created.map(c => `<tr><td>${escapeHtml(c.position)}</td><td>${escapeHtml(c.department || '')}</td><td>${escapeHtml(c.count || '')}</td></tr>`).join('');
-                    document.getElementById('staffing-result').innerHTML = created.length
-                        ? `<div style="overflow-x:auto;margin-top:10px;"><table class="tst" style="font-size:13px;"><thead><tr><th>Должность</th><th>Отдел</th><th>Ставок</th></tr></thead><tbody>${rows}</tbody></table></div>`
-                        : '';
-                    employeesLoaded = false; loadEmployees();
-                    return;
-                }
-                const created = data.created || [], skipped = data.skipped || [];
-                status.textContent = `Создано: ${created.length}, пропущено: ${skipped.length}.`;
-                window._staffingCreated = created;
-                const rows = created.map(c =>
+                const profiles = data.profiles || [], vacancies = data.vacancies || [], skipped = data.skipped || [];
+                status.textContent = `Профилей: ${profiles.length}, вакансий: ${vacancies.length}, пропущено: ${skipped.length}.`;
+                window._staffingCreated = profiles;
+                const pRows = profiles.map(c =>
                     `<tr><td>${escapeHtml(c.full_name)}</td><td class="mono">${escapeHtml(c.username)}</td><td class="mono">${escapeHtml(c.password)}</td><td>${escapeHtml(c.position || '')}</td></tr>`).join('');
+                const vRows = vacancies.map(v => `<tr><td>${escapeHtml(v.position)}</td><td>${escapeHtml(v.department || '')}</td></tr>`).join('');
                 const skipRows = skipped.map(s => `<div class="muted">${escapeHtml(s.full_name)} — ${escapeHtml(s.reason)}</div>`).join('');
                 document.getElementById('staffing-result').innerHTML = `
-                    ${created.length ? `<div class="warn" style="margin:12px 0;"><i data-lucide="triangle-alert"></i> Пароли показываются один раз — выгрузите их сейчас.</div>
+                    ${profiles.length ? `<div class="warn" style="margin:12px 0;"><i data-lucide="triangle-alert"></i> Пароли показываются один раз — выгрузите их сейчас.</div>
                     <button class="ghost-btn" onclick="downloadStaffingCsv()"><i data-lucide="download"></i> Скачать логины и пароли (CSV)</button>
-                    <div style="overflow-x:auto;margin-top:10px;"><table class="tst" style="width:100%;border-collapse:collapse;font-size:13px;">
-                        <thead><tr><th>ФИО</th><th>Логин</th><th>Пароль</th><th>Должность</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+                    <div style="overflow-x:auto;margin-top:10px;"><table class="tst" style="font-size:13px;">
+                        <thead><tr><th>ФИО</th><th>Логин</th><th>Пароль</th><th>Должность</th></tr></thead><tbody>${pRows}</tbody></table></div>` : ''}
+                    ${vacancies.length ? `<div style="margin-top:14px;font-weight:600;">Вакансии (${vacancies.length}):</div>
+                    <div style="overflow-x:auto;margin-top:6px;"><table class="tst" style="font-size:13px;">
+                        <thead><tr><th>Должность</th><th>Отдел</th></tr></thead><tbody>${vRows}</tbody></table></div>` : ''}
                     ${skipRows ? `<div style="margin-top:12px;"><strong>Пропущены:</strong>${skipRows}</div>` : ''}`;
                 refreshIcons();
-                employeesLoaded = false;   // список пользователей и дропдауны обновятся при открытии вкладки
+                employeesLoaded = false;
                 loadEmployees();
             }).catch(err => { status.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`; });
         }
