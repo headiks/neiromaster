@@ -49,10 +49,13 @@ def _llm(system: str, user: str) -> str:
 
 def _parse_json(text: str) -> dict:
     text = re.sub(r"```json\s*|```", "", text)
-    a, b = text.find("{"), text.rfind("}")
-    if a == -1 or b == -1:
+    i = text.find("{")
+    if i == -1:
         raise ValueError("нет JSON в ответе модели")
-    return json.loads(text[a:b + 1])
+    # raw_decode берёт ПЕРВЫЙ валидный объект и игнорирует хвост (модель иногда дописывает
+    # второй объект или пояснение -> обычный json.loads падал бы с «Extra data»)
+    obj, _ = json.JSONDecoder().raw_decode(text[i:])
+    return obj
 
 
 MAP_SYSTEM = """Ты — парсер табличных выгрузок. Тебе дают первые строки таблицы (с индексами
