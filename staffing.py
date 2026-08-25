@@ -85,10 +85,26 @@ def _temp_password(length: int = 10) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+_PATRONYMIC = ("вич", "вна", "ична", "оглы", "кызы", "угли", "уулу")
+_STOP = {"по", "и", "на", "в", "с", "для", "отдела", "отдел", "участка", "службы", "работ"}
+
+
 def _looks_like_name(s: str) -> bool:
-    """Похоже на ФИО: есть пробел, буквы, нет цифр, длина разумная."""
+    """Похоже на ФИО, а не на должность/подразделение. Настоящее ФИО: без цифр, не
+    орг-единица, и либо есть отчество (…вич/…вна/…кызы), либо 3+ слов с заглавной без
+    служебных слов. Двухсловные должности («Главный геолог») сюда НЕ проходят."""
     s = (s or "").strip()
-    return bool(s) and " " in s and len(s) >= 5 and not any(ch.isdigit() for ch in s)
+    if not s or any(ch.isdigit() for ch in s):
+        return False
+    low = s.lower()
+    if any(h in low for h in _ORG_HINTS):
+        return False
+    toks = s.split()
+    if len(toks) < 2:
+        return False
+    if any(t.lower().endswith(p) for p in _PATRONYMIC for t in toks):
+        return True
+    return len(toks) >= 3 and all(t[:1].isupper() for t in toks) and not any(t.lower() in _STOP for t in toks)
 
 
 # ---------- Построчная классификация «подразделение / должность» ----------
@@ -185,10 +201,27 @@ def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
     return records
 
 
+def _repair_mapping(grid: list, mapping: dict) -> None:
+    """Если модель отнесла к ФИО столбец, где на деле почти нет настоящих имён (должности/
+    подразделения), — снимаем ФИО и используем этот столбец как источник должности."""
+    cols = mapping.get("columns") or {}
+    fn = cols.get("full_name")
+    if fn is None:
+        return
+    start = mapping.get("data_start_row") or 0
+    vals = [_cell(row, fn) for row in grid[start:start + 40]]
+    vals = [v for v in vals if v]
+    if vals and sum(1 for v in vals if _looks_like_name(v)) < len(vals) * 0.3:
+        if cols.get("position") is None:
+            cols["position"] = fn
+        cols["full_name"] = None
+
+
 def parse_file(source, filename: str = None, classifier=None) -> dict:
     """Разбор xlsx/xls/csv -> {"mapping", "records"} в единой схеме (4 поля)."""
     grid = tablemap.read_table_grid(source, filename)
     mapping = tablemap.map_columns(grid, UNIFIED_FIELDS)
+    _repair_mapping(grid, mapping)
     records = extract_unified(grid, mapping, classifier)
     return {"mapping": mapping, "records": records, "count": len(records)}
 
