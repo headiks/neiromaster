@@ -25,7 +25,7 @@ from config import OLLAMA_URL
 
 LLM_MODEL = os.environ.get("NEIROMASTER_TABLEMAP_MODEL", "qwen3:14b")
 LLM_TIMEOUT = 180
-SAMPLE_ROWS = 15   # сколько первых строк показываем модели для определения разметки
+SAMPLE_ROWS = 22   # сколько первых строк показываем модели (чтобы видеть 2+ групповых баннера)
 
 
 def _cell(v) -> str:
@@ -52,13 +52,25 @@ def _parse_json(text: str) -> dict:
 
 
 MAP_SYSTEM = """Ты — парсер табличных выгрузок. Тебе дают первые строки таблицы (с индексами
-строк и столбцов, начиная с 0) и список ЖЕЛАЕМЫХ ПОЛЕЙ на выходе. Определи:
+строк и столбцов, начиная с 0) и список ЖЕЛАЕМЫХ ПОЛЕЙ на выходе. ВНИМАТЕЛЬНО разбери
+структуру таблицы, учитывая явные И неявные заголовки. Определи:
 1) с какого индекса строки начинаются собственно ДАННЫЕ (шапки, заголовки, пустые строки
-   сверху — не данные);
+   сверху — не данные). Если данные разбиты на группы строками-баннерами (см. п.3),
+   data_start_row — это строка ПЕРВОГО баннера/группы, чтобы ни одна группа не потерялась;
 2) какой индекс СТОЛБЦА соответствует каждому желаемому полю (по смыслу заголовков и
-   образца значений). Если подходящего столбца нет — верни null.
+   образца значений). Если подходящего столбца нет — null.
+3) СЕКЦИОННЫЕ (групповые) поля: иногда значение поля задаётся не в каждой строке, а
+   строкой-БАННЕРОМ над группой строк. Пример: над блоком сотрудников идёт отдельная
+   строка с названием отдела/подразделения («Администрация», «Департамент продаж»,
+   «Отдел: …»), затем сотрудники этого отдела, потом следующий баннер и т.д. Строки-баннеры
+   НЕ являются данными: в них заполнен только столбец с названием группы, а ключевые поля
+   (например ФИО) пустые. Если желаемое поле задаётся так — верни в "sections" ИНДЕКС
+   СТОЛБЦА, где стоит значение баннера (оно будет протянуто вниз ко всем строкам группы до
+   следующего баннера). Ищи такие неявные группировки внимательно.
 Ответ — СТРОГО JSON без пояснений:
-{"data_start_row": <int>, "columns": {"<поле>": <индекс столбца или null>, ...}}"""
+{"data_start_row": <int>, "columns": {"<поле>": <индекс столбца или null>, ...},
+ "sections": {"<поле>": <индекс столбца баннера>, ...}}
+Поля, значение которых берётся из обычного столбца в каждой строке, в "sections" не включай."""
 
 
 def _grid_preview(grid: list, rows: int = SAMPLE_ROWS) -> str:
@@ -78,12 +90,18 @@ def map_columns(grid: list, target_fields: list) -> dict:
     user = f"Желаемые поля:\n{fields_txt}\n\nПервые строки таблицы:\n{_grid_preview(grid)}"
     data = _parse_json(_llm(MAP_SYSTEM, user))
     cols = data.get("columns") or {}
+    secs = data.get("sections") or {}
     # оставляем только запрошенные поля; приводим индексы к int или None
-    clean = {}
+    def _col(v):
+        return int(v) if isinstance(v, (int, float)) or (isinstance(v, str) and str(v).isdigit()) else None
+
+    clean, sections = {}, {}
     for name in names:
-        v = cols.get(name)
-        clean[name] = int(v) if isinstance(v, (int, float)) or (isinstance(v, str) and v.isdigit()) else None
-    return {"data_start_row": int(data.get("data_start_row") or 0), "columns": clean}
+        clean[name] = _col(cols.get(name))
+        sc = _col(secs.get(name))
+        if sc is not None:
+            sections[name] = sc   # индекс столбца строки-баннера, значение протягивается вниз
+    return {"data_start_row": int(data.get("data_start_row") or 0), "columns": clean, "sections": sections}
 
 
 def extract_records(grid: list, mapping: dict, required: Optional[list] = None) -> list:
@@ -91,16 +109,30 @@ def extract_records(grid: list, mapping: dict, required: Optional[list] = None) 
     mapping — результат map_columns. required — поля, без которых строка пропускается
     (по умолчанию первое поле с не-null столбцом). Возвращает список dict по полям."""
     columns = mapping.get("columns") or {}
+    sections = mapping.get("sections") or {}
     start = mapping.get("data_start_row") or 0
     if required is None:
         required = [name for name, col in columns.items() if col is not None][:1]
+
+    def cval(row, col):
+        return _cell(row[col]) if (col is not None and col < len(row)) else ""
+
+    carried = {}   # секционное поле -> последнее значение строки-баннера (протягивается вниз)
     records = []
     for row in grid[start:]:
-        rec = {}
-        for name, col in columns.items():
-            rec[name] = _cell(row[col]) if (col is not None and col < len(row)) else ""
-        if all(rec.get(k) for k in required):
-            records.append(rec)
+        is_data = all(cval(row, columns.get(k)) for k in required) if required else True
+        if not is_data:
+            # строка-баннер группы: обновляем протягиваемые вниз значения секционных полей
+            for name, scol in sections.items():
+                v = cval(row, scol)
+                if v:
+                    carried[name] = v
+            continue
+        rec = {name: cval(row, col) for name, col in columns.items()}
+        for name in sections:
+            if not rec.get(name):
+                rec[name] = carried.get(name, "")
+        records.append(rec)
     return records
 
 
@@ -120,3 +152,36 @@ def read_xlsx_grid(source) -> list:
                                 data_only=True, read_only=True)
     ws = wb.active
     return [[_cell(v) for v in row] for row in ws.iter_rows(values_only=True)]
+
+
+def read_csv_grid(source) -> list:
+    """Читает CSV/TSV (путь или bytes) в 2D-грид. Кодировка и разделитель определяются
+    автоматически (utf-8/cp1251, ';'/','/tab) — выгрузки из Excel обычно cp1251 с ';'."""
+    import io
+    import csv
+    raw = source if isinstance(source, (bytes, bytearray)) else open(source, "rb").read()
+    text = None
+    for enc in ("utf-8-sig", "cp1251", "utf-8"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=";,\t")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        head = text[:4096]
+        delimiter = ";" if head.count(";") >= head.count(",") else ","
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    return [[_cell(c) for c in row] for row in reader]
+
+
+def read_table_grid(source, filename: Optional[str] = None) -> list:
+    """Единая точка чтения таблицы: CSV/TSV или xlsx — по расширению имени файла."""
+    name = (filename or (source if isinstance(source, str) else "")).lower()
+    if name.endswith(".csv") or name.endswith(".tsv"):
+        return read_csv_grid(source)
+    return read_xlsx_grid(source)
