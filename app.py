@@ -24,6 +24,7 @@ import questions
 import folders
 import stages
 import classify
+import staffing
 import employees as adaptation
 import mailing
 import sender
@@ -532,6 +533,34 @@ async def upload_document(file: UploadFile = File(...)):
 
     job = indexing.enqueue_document(filepath)
     return JSONResponse(status_code=202, content=job)
+
+
+# ---------- Штатное расписание (первичный инструмент: люди и должности) ----------
+class StaffingImportRequest(BaseModel):
+    records: list = []
+
+
+@app.post("/staffing/preview", dependencies=admin_only)
+async def staffing_preview(file: UploadFile = File(...)):
+    """Разбор загруженной xlsx-штатки: ИИ определяет разметку столбцов, возвращаем
+    найденное сопоставление и извлечённые записи для подтверждения администратором."""
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"Файл превышает лимит {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ")
+    try:
+        result = staffing.parse_xlsx(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось разобрать таблицу: {e}")
+    result["count"] = len(result.get("records") or [])
+    return result
+
+
+@app.post("/staffing/import", dependencies=admin_only)
+async def staffing_import(req: StaffingImportRequest):
+    """Массовое создание профилей сотрудников из подтверждённых строк штатки.
+    В ответе — созданные логины и одноразовые пароли (показываются один раз) для выгрузки."""
+    return staffing.import_records(req.records or [])
 
 
 @app.get("/documents/jobs/{job_id}", dependencies=admin_only)

@@ -230,6 +230,12 @@
         }
         .sub-when { font-size: 12px; color: #7c3aed; margin-top: 6px; }
         .add-row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+        .muted { color: #64748b; }
+        .err { color: #b42318; }
+        .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+        .tst { width: 100%; border-collapse: collapse; }
+        .tst th, .tst td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }
+        .tst th { background: #f1f5f9; }
         .progress-wrap { margin: 16px 0; }
         .progress-bar { height: 10px; background: #e2e8f0; border-radius: 6px; overflow: hidden; }
         .progress-bar > div { height: 100%; background: #3b82f6; width: 0; transition: width 0.3s; }
@@ -298,14 +304,32 @@
     </div>
 
     <div class="tabs">
-        <button class="tab active" data-tab="docs"><i data-lucide="database"></i> База знаний</button>
+        <button class="tab active" data-tab="staffing"><i data-lucide="table"></i> Штатное расписание</button>
+        <button class="tab" data-tab="docs"><i data-lucide="database"></i> База знаний</button>
         <button class="tab" data-tab="builder"><i data-lucide="calendar-cog"></i> Конструктор плана</button>
         <button class="tab" data-tab="employees"><i data-lucide="users"></i> Пользователи</button>
         <button class="tab" data-tab="questions"><i data-lucide="help-circle"></i> Вопросы <span id="questions-badge" class="q-badge" style="display:none;"></span></button>
     </div>
 
     <!-- ==================== БАЗА ЗНАНИЙ ==================== -->
-    <div class="tab-pane active" id="pane-docs">
+    <div class="tab-pane active" id="pane-staffing">
+        <h2><i data-lucide="table"></i> Штатное расписание</h2>
+        <p class="muted" style="color:#64748b;font-size:14px;">
+            Первичный инструмент: загрузите штатку (xlsx) — ИИ сам определит, какой столбец
+            какому полю соответствует, и создаст профили сотрудников. Логин выдаётся по ФИО,
+            пароль временный (сотрудник сменит при первом входе). Должности из штатки станут
+            доступны в списке при заполнении карточек.
+        </p>
+        <div class="add-row">
+            <input type="file" id="staffing-file" accept=".xlsx">
+            <button class="ghost-btn" onclick="staffingPreview()"><i data-lucide="scan-search"></i> Разобрать таблицу</button>
+        </div>
+        <div id="staffing-status" class="muted" style="margin-top:10px;color:#64748b;font-size:14px;"></div>
+        <div id="staffing-preview"></div>
+        <div id="staffing-result"></div>
+    </div>
+
+    <div class="tab-pane" id="pane-docs">
         <h2 class="section-title"><i data-lucide="upload-cloud"></i> Загрузка регламентов</h2>
         <div class="dropzone" id="dropzone">
             <div><i data-lucide="upload" style="width:28px;height:28px;display:block;margin:0 auto 8px;color:var(--color-accent);"></i> Перетащите PDF или DOCX сюда, или нажмите, чтобы выбрать файл</div>
@@ -423,7 +447,8 @@
                 </div>
                 <div class="field">
                     <label>Должность</label>
-                    <input type="text" id="emp-position" placeholder="Водитель">
+                    <input type="text" id="emp-position" list="dl-positions" placeholder="Начните вводить — выбор из штатки">
+                    <datalist id="dl-positions"></datalist>
                 </div>
                 <div class="field">
                     <label>Подразделение</label>
@@ -448,12 +473,13 @@
                 </div>
                 <div class="field">
                     <label>Наставник</label>
-                    <input type="text" id="emp-mentor" placeholder="Петров П.П., +7 900 000-00-00">
+                    <input type="text" id="emp-mentor" list="dl-users" placeholder="Начните вводить ФИО — выбор из пользователей">
                 </div>
                 <div class="field">
                     <label>Руководитель</label>
-                    <input type="text" id="emp-manager" placeholder="Сидоров С.С.">
+                    <input type="text" id="emp-manager" list="dl-users" placeholder="Начните вводить ФИО — выбор из пользователей">
                 </div>
+                <datalist id="dl-users"></datalist>
                 <div class="field">
                     <label>Контакт сотрудника</label>
                     <input type="text" id="emp-contact" placeholder="телефон, telegram или email">
@@ -889,6 +915,84 @@
             if (!confirm('Запустить повторный анализ всей базы под текущую структуру папок?')) return;
             api('/documents/reanalyze', { method: 'POST' })
                 .then(() => { anyReanalyzing = true; bumpDocPolling(); });   // статусы «Переанализ…» подтянутся опросом
+        }
+
+        // ---------------- Штатное расписание ----------------
+        const STAFFING_LABELS = { full_name: 'ФИО', position: 'Должность', department: 'Отдел',
+                                  tab_number: 'Табельный №', start_date: 'Дата приёма' };
+        let staffingRecords = [];
+
+        function staffingPreview() {
+            const file = document.getElementById('staffing-file').files[0];
+            const status = document.getElementById('staffing-status');
+            const preview = document.getElementById('staffing-preview');
+            const result = document.getElementById('staffing-result');
+            result.innerHTML = ''; preview.innerHTML = '';
+            if (!file) { status.textContent = 'Выберите файл xlsx.'; return; }
+            status.textContent = 'ИИ разбирает таблицу…';
+            const fd = new FormData(); fd.append('file', file);
+            apiJson('/staffing/preview', { method: 'POST', body: fd })
+                .then(({ ok, data }) => {
+                    if (!ok) { status.innerHTML = `<span class="err">${escapeHtml(data.detail || 'ошибка разбора')}</span>`; return; }
+                    staffingRecords = data.records || [];
+                    status.textContent = `Найдено сотрудников: ${data.count}.`;
+                    const cols = (data.mapping || {}).columns || {};
+                    const mapLine = Object.keys(STAFFING_LABELS).map(f =>
+                        `${STAFFING_LABELS[f]}: ${cols[f] != null ? 'столбец ' + cols[f] : '<span class="muted">не найден</span>'}`
+                    ).join(' · ');
+                    const head = Object.keys(STAFFING_LABELS).map(f => `<th>${STAFFING_LABELS[f]}</th>`).join('');
+                    const rows = staffingRecords.map(r =>
+                        `<tr>${Object.keys(STAFFING_LABELS).map(f => `<td>${escapeHtml(r[f] || '')}</td>`).join('')}</tr>`).join('');
+                    preview.innerHTML = `
+                        <div class="doc-meta" style="margin:12px 0;">Разметка: ${mapLine}</div>
+                        <div style="overflow-x:auto;"><table class="tst" style="width:100%;border-collapse:collapse;font-size:13px;">
+                            <thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+                        <button class="ghost-btn" style="margin-top:12px;" onclick="staffingImport()"><i data-lucide="user-plus"></i> Создать профили (${staffingRecords.length})</button>`;
+                    refreshIcons();
+                })
+                .catch(err => { status.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`; });
+        }
+
+        function staffingImport() {
+            if (!staffingRecords.length) return;
+            if (!confirm(`Создать ${staffingRecords.length} профилей? Существующие (по ФИО) будут пропущены.`)) return;
+            const status = document.getElementById('staffing-status');
+            status.textContent = 'Создаём профили…';
+            apiJson('/staffing/import', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ records: staffingRecords })
+            }).then(({ ok, data }) => {
+                if (!ok) { status.innerHTML = `<span class="err">${escapeHtml(data.detail || 'ошибка создания')}</span>`; return; }
+                const created = data.created || [], skipped = data.skipped || [];
+                status.textContent = `Создано: ${created.length}, пропущено: ${skipped.length}.`;
+                window._staffingCreated = created;
+                const rows = created.map(c =>
+                    `<tr><td>${escapeHtml(c.full_name)}</td><td class="mono">${escapeHtml(c.username)}</td><td class="mono">${escapeHtml(c.password)}</td><td>${escapeHtml(c.position || '')}</td></tr>`).join('');
+                const skipRows = skipped.map(s => `<div class="muted">${escapeHtml(s.full_name)} — ${escapeHtml(s.reason)}</div>`).join('');
+                document.getElementById('staffing-result').innerHTML = `
+                    ${created.length ? `<div class="warn" style="margin:12px 0;"><i data-lucide="triangle-alert"></i> Пароли показываются один раз — выгрузите их сейчас.</div>
+                    <button class="ghost-btn" onclick="downloadStaffingCsv()"><i data-lucide="download"></i> Скачать логины и пароли (CSV)</button>
+                    <div style="overflow-x:auto;margin-top:10px;"><table class="tst" style="width:100%;border-collapse:collapse;font-size:13px;">
+                        <thead><tr><th>ФИО</th><th>Логин</th><th>Пароль</th><th>Должность</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+                    ${skipRows ? `<div style="margin-top:12px;"><strong>Пропущены:</strong>${skipRows}</div>` : ''}`;
+                refreshIcons();
+                employeesLoaded = false;   // список пользователей и дропдауны обновятся при открытии вкладки
+                loadEmployees();
+            }).catch(err => { status.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`; });
+        }
+
+        function downloadStaffingCsv() {
+            const created = window._staffingCreated || [];
+            if (!created.length) return;
+            const esc = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+            const lines = [['ФИО', 'Логин', 'Пароль', 'Должность'].join(';')]
+                .concat(created.map(c => [c.full_name, c.username, c.password, c.position || ''].map(esc).join(';')));
+            const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'staffing_credentials.csv';
+            a.click();
+            URL.revokeObjectURL(a.href);
         }
 
         function showDocDetail(filename) {
@@ -1568,7 +1672,18 @@
             api('/users').then(r => r.json()).then(d => {
                 employeesCache = d.users || [];
                 renderEmployees(employeesCache);
+                populateDirectories(employeesCache);
             }).catch(() => {});
+        }
+
+        // Дропдауны с поиском: должности из штатки (distinct position) и ФИО пользователей.
+        function populateDirectories(usersList) {
+            const positions = [...new Set(usersList.map(u => (u.position || '').trim()).filter(Boolean))].sort();
+            const names = [...new Set(usersList.map(u => (u.full_name || '').trim()).filter(Boolean))].sort();
+            const posDl = document.getElementById('dl-positions');
+            const usrDl = document.getElementById('dl-users');
+            if (posDl) posDl.innerHTML = positions.map(p => `<option value="${escapeHtml(p)}">`).join('');
+            if (usrDl) usrDl.innerHTML = names.map(n => `<option value="${escapeHtml(n)}">`).join('');
         }
 
         function roleBadge(user) {
