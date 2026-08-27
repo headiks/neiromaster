@@ -24,6 +24,8 @@ __pycache__/
 /data/*
 !/data/stage_catalog.json
 !/data/knowledge_seed.json
+!/data/name_dict/
+!/data/name_dict/*.txt
 
 # Явный список секретов/ПДн — на случай изменения структуры data/
 data/users.json

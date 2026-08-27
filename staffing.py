@@ -17,6 +17,7 @@ staffing.py — импорт любой таблицы штатки/штатно
 Импорт: строка с ФИО -> профиль (логин по ФИО, временный пароль); без ФИО -> вакансия.
 """
 
+import os
 import re
 import json
 import secrets
@@ -47,6 +48,46 @@ _TRANSLIT = str.maketrans({
     "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c",
     "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
 })
+
+
+# ---------- Словарь ФИО (детерминированная проверка на человека) ----------
+# Три списка (Имя / Отчество / Фамилия). Если ячейка похожа на ФИО И хотя бы один её
+# полнословный токен есть в словаре — это ЧЕЛОВЕК, без обращения к модели. Ловит людей,
+# которых классификатор мог пропустить или принять за должность.
+_NAME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "name_dict")
+_NAME_FILES = ("first_names.txt", "middle_names.txt", "last_names.txt")
+_NAME_SET = None
+
+# капитализированное кириллическое слово (допускаем дефис: «Мурат-оол»); инициал «И.»/«И.О.»
+_NAME_WORD = re.compile(r"^[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?$")
+_NAME_INIT = re.compile(r"^[А-ЯЁ]\.?(?:[А-ЯЁ]\.?)?$")
+
+
+def _name_set() -> set:
+    global _NAME_SET
+    if _NAME_SET is None:
+        s = set()
+        for fn in _NAME_FILES:
+            try:
+                with open(os.path.join(_NAME_DIR, fn), encoding="utf-8") as f:
+                    s.update(ln.strip().lower() for ln in f if ln.strip())
+            except OSError:
+                pass
+        _NAME_SET = s
+    return _NAME_SET
+
+
+def looks_like_person(text: str) -> bool:
+    """True, если ячейка — ФИО: 2–4 токена, ВСЕ похожи на имя (слово с заглавной или
+    инициал) И хотя бы одно полное слово есть в словаре Имён/Отчеств/Фамилий."""
+    toks = [t for t in re.split(r"\s+", (text or "").strip()) if t]
+    if not (2 <= len(toks) <= 4):
+        return False
+    words = [t for t in toks if _NAME_WORD.match(t)]
+    if not words or any(not (_NAME_WORD.match(t) or _NAME_INIT.match(t)) for t in toks):
+        return False
+    known = _name_set()
+    return any(w.lower() in known for w in words)
 
 
 # ---------- Логины/пароли ----------
@@ -185,11 +226,18 @@ def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
     texts = set()
     for row in rows:
         for c in cand_cols:
-            texts.add(_cell(row, c))
+            t = _cell(row, c)
+            if t and not looks_like_person(t):   # ФИО из словаря модели не показываем
+                texts.add(t)
     labels = classify_cells(texts, classifier)
 
     def lab(t):
-        return labels.get((t or "").strip()) if (t or "").strip() else None
+        t = (t or "").strip()
+        if not t:
+            return None
+        if looks_like_person(t):                 # словарь ФИО важнее вердикта модели
+            return "person"
+        return labels.get(t)
 
     def count(col, cls):
         return -1 if col is None else sum(1 for row in rows if lab(_cell(row, col)) == cls)
@@ -210,7 +258,7 @@ def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
     # непустые ячейки (не только кандидатные колонки) и добираем классы. Так ловим сдвиг, когда
     # ФИО или должность стоит в неожиданной колонке (объединённые ячейки, разъехавшийся шаблон).
     def _ensure_labels(extra):
-        missing = [t for t in extra if t and t not in labels]
+        missing = [t for t in extra if t and t not in labels and not looks_like_person(t)]
         if missing:
             labels.update(classify_cells(missing, classifier))
 
@@ -234,7 +282,7 @@ def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
             if extra:
                 _ensure_labels(extra)
                 for t in extra:
-                    cl = labels.get(t)
+                    cl = lab(t)
                     if cl in ("person", "position", "org"):
                         found.setdefault(cl, t)
         return found

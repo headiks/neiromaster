@@ -124,6 +124,32 @@ def test_extract_position_column_mislabeled_as_name():
     assert recs == [{"full_name": "", "position": "Главный геолог", "department": "", "start_date": ""}]
 
 
+def test_looks_like_person_dict():
+    # реальные ФИО из словаря -> человек; должности/категории/орг -> нет
+    assert staffing.looks_like_person("Иванов Иван Иванович")
+    assert staffing.looks_like_person("Петров Пётр Петрович")
+    assert staffing.looks_like_person("Иванов И.И.")           # с инициалами
+    assert not staffing.looks_like_person("Ведущий инженер")
+    assert not staffing.looks_like_person("Слесарь 5 разряда")  # цифра -> не имя
+    assert not staffing.looks_like_person("Специалисты")        # одно слово
+    assert not staffing.looks_like_person("")
+
+
+def test_extract_person_via_name_dict_overrides_model():
+    # классификатор ошибочно назвал ФИО должностью — словарь ФИО всё равно заводит человека
+    grid = [
+        ["ФИО", "Должность", "Дата"],
+        ["Петров Пётр Петрович", "Слесарь", "01.03.2026"],
+    ]
+    mapping = {"data_start_row": 1,
+               "columns": {"full_name": 0, "position": 1, "department": None, "start_date": 2},
+               "sections": {}}
+    cls = _stub({"Петров Пётр Петрович": "position", "Слесарь": "position"})  # модель врёт
+    recs = staffing.extract_unified(grid, mapping, classifier=cls)
+    assert recs == [{"full_name": "Петров Пётр Петрович", "position": "Слесарь",
+                     "department": "", "start_date": "01.03.2026"}]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
