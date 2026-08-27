@@ -71,6 +71,14 @@ def catalog_stage_query(stage: dict) -> str:
     return ". ".join(p for p in parts if p)
 
 
+def catalog_substage_query(stage: dict, sub: dict) -> str:
+    """Смысловой «запрос подэтапа» — заголовок этапа для контекста + заголовок, бриф и теги
+    подэтапа. По нему чанки раскладываются по ПОДЭТАПАМ (тоньше этапа, мульти-лейбл)."""
+    parts = [stage.get("title", ""), sub.get("title", ""), sub.get("brief", "")]
+    parts += sub.get("tags") or []
+    return ". ".join(p for p in parts if p)
+
+
 def build_full_template(title: str = "Универсальный план адаптации") -> dict:
     """Полный универсальный шаблон плана из ВСЕГО каталога: все этапы и все подэтапы с их
     описаниями, длительностями и временем. Профессионально-независимый — дальше человек
@@ -403,15 +411,52 @@ def delete_plan(plan_id: str) -> bool:
     return True
 
 
-def load_schedule(plan_id: str) -> Optional[dict]:
+def profession_slug(position: str) -> str:
+    """Короткий стабильный slug должности для имени файла расписания профессии."""
+    return _slug(position, "obshiy")
+
+
+def _schedule_path(plan_id: str, profession: str = ""):
+    """schedule.json — общее расписание; schedules/<slug>.json — под конкретную должность."""
+    directory = plan_dir(plan_id)
+    if (profession or "").strip():
+        return directory / "schedules" / f"{profession_slug(profession)}.json"
+    return directory / "schedule.json"
+
+
+def load_schedule(plan_id: str, profession: str = "") -> Optional[dict]:
+    """Расписание плана. При указанной должности берём расписание её профессии; если его нет —
+    откат на общее (schedule.json). Так план один, а контент — под профессию из аккаунта."""
     try:
-        path = plan_dir(plan_id) / "schedule.json"
+        path = _schedule_path(plan_id, profession)
     except ValueError:
         return None
+    if not path.exists() and profession:
+        try:
+            path = _schedule_path(plan_id, "")   # откат на общее
+        except ValueError:
+            return None
     if not path.exists():
         return None
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def list_schedule_professions(plan_id: str) -> list:
+    """Список профессий, под которые сгенерированы расписания (по файлам schedules/*.json)."""
+    try:
+        directory = plan_dir(plan_id) / "schedules"
+    except ValueError:
+        return []
+    if not directory.exists():
+        return []
+    out = []
+    for f in sorted(directory.glob("*.json")):
+        try:
+            out.append({"slug": f.stem, "profession": json.loads(f.read_text(encoding="utf-8")).get("profession", "")})
+        except (json.JSONDecodeError, OSError):
+            continue
+    return out
 
 
 def _write_json(path: Path, data: dict):
@@ -643,10 +688,10 @@ def pick_topics(stage: dict, substage: dict, topic_list: list) -> list:
     return picked or [t["slug"] for t in available]
 
 
-def generate_substage_message(stage: dict, substage: dict, topic_list: list, role: str = "") -> dict:
+def generate_substage_message(stage: dict, substage: dict, topic_list: list, position: str = "") -> dict:
     """Генерирует текст одного подэтапа. Ошибки не поднимает — возвращает status=error.
-    role — должность/профессия плана: из «папки этапа» (чанки, разложенные по этому этапу)
-    приоритет получают чанки этой профессии (механика приоритета по должности)."""
+    position — должность/профессия сотрудника (из аккаунта): чанки берутся из «папки подэтапа»
+    (разложенные по этому подэтапу), приоритет — чанкам этой профессии (буст по должности)."""
     import indexing
     from rag import big_llm
 
@@ -657,7 +702,8 @@ def generate_substage_message(stage: dict, substage: dict, topic_list: list, rol
         result["topics_used"] = picked
 
         chunks = indexing.search_chunks(_substage_query(stage, substage), picked, limit=CONTEXT_CHUNKS,
-                                        plan_stage=stage.get("catalog_id"), position=role)
+                                        plan_stage=stage.get("catalog_id"),
+                                        plan_substage=substage.get("catalog_id"), position=position)
         result["sources"] = [{"source": c["source"], "folders": c.get("folders") or [],
                               "page": c["page"], "score": round(c["score"], 3)} for c in chunks]
 
@@ -685,10 +731,11 @@ def generate_substage_message(stage: dict, substage: dict, topic_list: list, rol
     return result
 
 
-def build_schedule(plan: dict, generated: dict) -> dict:
+def build_schedule(plan: dict, generated: dict, profession: str = "") -> dict:
     """
     Собирает финальный документ: плоский список сообщений с временем отправки.
     generated — {message_id: результат generate_substage_message}.
+    profession — должность, под которую собран контент ("" = общее расписание).
     """
     items = resolve_schedule(plan)
     messages = []
@@ -710,6 +757,7 @@ def build_schedule(plan: dict, generated: dict) -> dict:
         "plan_id": plan.get("plan_id"),
         "plan_title": plan.get("title"),
         "role": plan.get("role"),
+        "profession": profession,
         "start_date": plan.get("start_date"),
         "timezone": plan.get("timezone", DEFAULT_TIMEZONE),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -717,12 +765,14 @@ def build_schedule(plan: dict, generated: dict) -> dict:
     }
 
 
-def save_schedule(plan_id: str, schedule: dict):
-    directory = plan_dir(plan_id)
-    directory.mkdir(parents=True, exist_ok=True)
+def save_schedule(plan_id: str, schedule: dict, profession: str = ""):
+    """Сохраняет расписание. Пустая profession -> общее (schedule.json); иначе — под должность
+    (schedules/<slug>.json). Так один план хранит и общий контент, и вариант под профессию."""
+    path = _schedule_path(plan_id, profession)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with _plans_lock:
-        _write_json(directory / "schedule.json", schedule)
-        (directory / "schedule.md").write_text(render_schedule_md(schedule), encoding="utf-8")
+        _write_json(path, schedule)
+        path.with_suffix(".md").write_text(render_schedule_md(schedule), encoding="utf-8")
 
 
 # ---------- Фоновые задачи генерации ----------
@@ -743,47 +793,56 @@ def get_job(job_id: str) -> Optional[dict]:
         return dict(job) if job else None
 
 
-def start_generation(plan: dict) -> dict:
-    """Запускает генерацию всех подэтапов плана в фоне, возвращает описание задачи."""
+def start_generation(plan: dict, positions: Optional[list] = None) -> dict:
+    """Запускает генерацию плана в фоне. positions — список уникальных должностей (из штатки):
+    под КАЖДУЮ генерируется своё расписание (чанки её профессии + общие), сотрудники этой
+    должности берут готовое. Без positions — одно общее расписание (profession="")."""
     import folders
+
+    # Уникальные должности + общее ("") как фолбэк для профессий без своего расписания.
+    profs = []
+    for p in (positions or []):
+        p = (p or "").strip()
+        if p and p not in profs:
+            profs.append(p)
+    profs = profs or [""]                 # хотя бы общее расписание
+    if profs != [""] and "" not in profs:
+        profs = profs + [""]              # плюс общее — для не перечисленных должностей
 
     job_id = str(uuid.uuid4())
     items = resolve_schedule(plan)
-    _set_job(job_id, plan_id=plan["plan_id"], status="queued", total=len(items), done=0,
+    _set_job(job_id, plan_id=plan["plan_id"], status="queued", total=len(items) * len(profs), done=0,
              current=None, started_at=time.strftime("%Y-%m-%dT%H:%M:%S"), finished_at=None,
-             errors=0, error=None)
+             errors=0, error=None, professions=len(profs))
 
     def run():
         _set_job(job_id, status="running")
-        generated = {}
         errors = 0
+        done = 0
         try:
             topic_list = folders.list_folders(include_disabled=False)
             stages_by_id = {s["id"]: s for s in plan.get("stages") or []}
-            for index, item in enumerate(items, start=1):
-                stage = stages_by_id.get(item["stage"]["id"], {})
-                substage = next(
-                    (s for s in stage.get("substages", []) if s["id"] == item["substage"]["id"]),
-                    item["substage"],
-                )
-                _set_job(job_id, current=f"{item['stage']['title']} → {item['substage']['title']}",
-                         done=index - 1)
-                payload = generate_substage_message(stage, substage, topic_list, role=plan.get("role") or "")
-                if payload["status"] == "error":
-                    errors += 1
-                generated[item["message_id"]] = payload
-                _set_job(job_id, done=index, errors=errors)
-
-            schedule = build_schedule(plan, generated)
-            save_schedule(plan["plan_id"], schedule)
+            for prof in profs:
+                generated = {}
+                label = prof or "общее"
+                for item in items:
+                    stage = stages_by_id.get(item["stage"]["id"], {})
+                    substage = next(
+                        (s for s in stage.get("substages", []) if s["id"] == item["substage"]["id"]),
+                        item["substage"],
+                    )
+                    _set_job(job_id, current=f"[{label}] {item['stage']['title']} → {item['substage']['title']}",
+                             done=done)
+                    payload = generate_substage_message(stage, substage, topic_list, position=prof)
+                    if payload["status"] == "error":
+                        errors += 1
+                    generated[item["message_id"]] = payload
+                    done += 1
+                    _set_job(job_id, done=done, errors=errors)
+                save_schedule(plan["plan_id"], build_schedule(plan, generated, profession=prof), profession=prof)
             _set_job(job_id, status="done", current=None,
                      finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         except Exception as e:
-            # Частичный результат тоже сохраняем — переген отдельных подэтапов дешевле полного
-            try:
-                save_schedule(plan["plan_id"], build_schedule(plan, generated))
-            except Exception:
-                pass
             _set_job(job_id, status="error", error=str(e),
                      finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
 
@@ -791,9 +850,9 @@ def start_generation(plan: dict) -> dict:
     return get_job(job_id)
 
 
-def regenerate_one(plan: dict, message_id: str) -> Optional[dict]:
+def regenerate_one(plan: dict, message_id: str, profession: str = "") -> Optional[dict]:
     """
-    Перегенерирует один подэтап и обновляет сохранённое расписание.
+    Перегенерирует один подэтап и обновляет сохранённое расписание нужной профессии.
     Возвращает обновлённое сообщение или None, если подэтап не найден.
     """
     import folders
@@ -809,11 +868,11 @@ def regenerate_one(plan: dict, message_id: str) -> Optional[dict]:
         return None
 
     payload = generate_substage_message(stage, substage, folders.list_folders(include_disabled=False),
-                                        role=plan.get("role") or "")
+                                        position=profession)
 
-    schedule = load_schedule(plan["plan_id"])
+    schedule = load_schedule(plan["plan_id"], profession)
     if schedule is None:
-        schedule = build_schedule(plan, {message_id: payload})
+        schedule = build_schedule(plan, {message_id: payload}, profession=profession)
     else:
         for index, msg in enumerate(schedule.get("messages") or []):
             if msg.get("message_id") == message_id:
@@ -824,5 +883,5 @@ def regenerate_one(plan: dict, message_id: str) -> Optional[dict]:
             schedule.setdefault("messages", []).append({**item, **payload, "actions": []})
         schedule["generated_at"] = datetime.now().isoformat(timespec="seconds")
 
-    save_schedule(plan["plan_id"], schedule)
+    save_schedule(plan["plan_id"], schedule, profession=profession)
     return next((m for m in schedule["messages"] if m["message_id"] == message_id), None)

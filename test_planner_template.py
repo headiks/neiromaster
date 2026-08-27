@@ -29,6 +29,19 @@ def test_catalog_stage_query_nonempty():
         assert st["title"] in q and len(q) > len(st["title"])   # заголовок + брифы подэтапов
 
 
+def test_catalog_substage_query_nonempty():
+    st = planner.load_catalog()["stages"][0]
+    sub = (st.get("substage_templates") or [])[0]
+    q = planner.catalog_substage_query(st, sub)
+    assert sub["title"] in q and st["title"] in q     # контекст этапа + сам подэтап
+
+
+def test_profession_slug_stable():
+    assert planner.profession_slug("Водитель автомобиля") == planner.profession_slug("Водитель автомобиля")
+    assert planner.profession_slug("") == "obshiy"
+    assert planner.profession_slug("Электрогазосварщик 5р") == planner.profession_slug("Электрогазосварщик 5р")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
