@@ -89,6 +89,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Предупреждение: векторы папок не построены (Qdrant/Ollama?): {e}")
 
+    # Пайплайн разметки docpipe: таблицы PG + версия плана из каталога адаптации.
+    try:
+        import docpipe
+        docpipe.init_schema()
+        docpipe.sync_plan_from_catalog()
+    except Exception as e:
+        print(f"Предупреждение: пайплайн разметки docpipe не инициализирован: {e}")
+
     # Разовые миграции со старых файловых хранилищ в БД
     moved_json = users.migrate_legacy_json_users()
     if moved_json:
