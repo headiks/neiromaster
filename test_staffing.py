@@ -1,6 +1,19 @@
 """Тесты штатки: логины + универсальный разбор (классификатор ячеек подменяем стабом,
 без сети/БД)."""
 
+import sys
+import types
+from unittest.mock import MagicMock
+
+# ---- заглушки тяжёлых зависимостей ДО импорта staffing (users -> db -> psycopg_pool) ----
+for _n in ("psycopg", "psycopg.types", "psycopg.rows", "psycopg_pool"):
+    sys.modules.setdefault(_n, types.ModuleType(_n))
+sys.modules["psycopg.types.json"] = types.ModuleType("psycopg.types.json")
+sys.modules["psycopg.types.json"].Json = lambda x: x
+sys.modules.setdefault("db", types.ModuleType("db"))
+sys.modules.setdefault("users", MagicMock())
+sys.modules.setdefault("requests", MagicMock())
+
 import staffing
 
 
@@ -62,6 +75,42 @@ def test_extract_positions_and_banners_one_column():
     recs = staffing.extract_unified(grid, mapping, classifier=cls)
     assert [r["position"] for r in recs] == ["Ведущий инженер", "Кладовщик"]
     assert all(r["department"] == "Обособленное подразделение А" and r["full_name"] == "" for r in recs)
+
+
+def test_extract_shifted_name_in_position_column():
+    # ФИО «разъехалось» в колонку должности (объединённые ячейки/сбитый шаблон):
+    # маршрут по КЛАССУ ячейки должен всё равно завести человека, а не выкинуть строку.
+    grid = [
+        ["Сотрудник", "Должность", "Дата"],
+        ["Иванов Иван Иванович", "Бухгалтер", "06.02.2026"],
+        ["", "Дулгерова Елена Александровна", ""],   # имя стоит в колонке должности
+    ]
+    mapping = {"data_start_row": 1,
+               "columns": {"full_name": 0, "position": 1, "department": None, "start_date": 2},
+               "sections": {}}
+    cls = _stub({"Иванов Иван Иванович": "person", "Бухгалтер": "position",
+                 "Дулгерова Елена Александровна": "person"})
+    recs = staffing.extract_unified(grid, mapping, classifier=cls)
+    assert recs == [
+        {"full_name": "Иванов Иван Иванович", "position": "Бухгалтер", "department": "", "start_date": "06.02.2026"},
+        {"full_name": "Дулгерова Елена Александровна", "position": "", "department": "", "start_date": ""},
+    ]
+
+
+def test_extract_recheck_name_in_unclassified_column():
+    # ФИО оказалось в колонке, которую модель не назвала ни ФИО, ни должностью:
+    # перепроверка выпавшей строки классифицирует все её ячейки и находит человека.
+    grid = [
+        ["Должность", "Разряд", "ФИО"],
+        ["Слесарь", "5", "Петров Пётр Петрович"],
+    ]
+    mapping = {"data_start_row": 1,
+               "columns": {"full_name": None, "position": 0, "department": None, "start_date": None},
+               "sections": {}}
+    cls = _stub({"Слесарь": "position", "Петров Пётр Петрович": "person", "Разряд": "other"})
+    recs = staffing.extract_unified(grid, mapping, classifier=cls)
+    assert recs == [{"full_name": "Петров Пётр Петрович", "position": "Слесарь",
+                     "department": "", "start_date": ""}]
 
 
 def test_extract_position_column_mislabeled_as_name():

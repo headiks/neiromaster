@@ -205,40 +205,57 @@ def extract_unified(grid: list, mapping: dict, classifier=None) -> list:
     if dept_sec is None:
         dept_sec = subj_c if count(subj_c, "org") > 0 else None
 
-    def cells(row):
-        return _cell(row, name_c), _cell(row, pos_c), (_cell(row, dept_sec) if dept_sec is not None else "")
+    # Перепроверка «выпавшей» строки: если по колонкам-кандидатам в строке не нашлось ни
+    # человека, ни должности, ни подразделения, а текст в строке есть — классифицируем ВСЕ её
+    # непустые ячейки (не только кандидатные колонки) и добираем классы. Так ловим сдвиг, когда
+    # ФИО или должность стоит в неожиданной колонке (объединённые ячейки, разъехавшийся шаблон).
+    def _ensure_labels(extra):
+        missing = [t for t in extra if t and t not in labels]
+        if missing:
+            labels.update(classify_cells(missing, classifier))
+
+    def row_classes(row, recheck=True):
+        """{class: text} для строки: первый person/position/org среди колонок-кандидатов.
+        Если человек не найден, а в строке есть НЕ разобранная колонка с текстом — перепроверяем
+        (классифицируем ещё не размеченные ячейки строки): так ловим сдвиг ФИО/должности в
+        неожиданную колонку. Разметка кэшируется (дедуп по тексту) — перепроверка не бьёт по
+        каждой строке заново."""
+        found = {}
+        examined = set()
+        for c in cand_cols:
+            t = _cell(row, c)
+            examined.add(t)
+            cl = lab(t)
+            if t and cl in ("person", "position", "org"):
+                found.setdefault(cl, t)
+        if recheck and "person" not in found:
+            extra = [(v or "").strip() for v in row
+                     if (v or "").strip() and any(ch.isalpha() for ch in v) and (v or "").strip() not in examined]
+            if extra:
+                _ensure_labels(extra)
+                for t in extra:
+                    cl = labels.get(t)
+                    if cl in ("person", "position", "org"):
+                        found.setdefault(cl, t)
+        return found
 
     carried = ""
     out = []
     for row in rows:
-        nm, ps, sv = cells(row)
         date = _cell(row, date_c)
+        cbc = row_classes(row)
+        # отдел из явной колонки, если это не колонка ФИО/должности/секции
         dept_col = _cell(row, dept_c) if (dept_c is not None and dept_c not in (pos_c, name_c, dept_sec)) else ""
-        nr, pr, sr = lab(nm), lab(ps), lab(sv)
-
-        if nr == "person":
-            position = ps if (ps and pr != "org") else ""
-            out.append({"full_name": nm, "position": position,
+        # приоритет: человек -> вакансия-должность -> баннер-подразделение
+        if "person" in cbc:
+            out.append({"full_name": cbc["person"], "position": cbc.get("position", ""),
                         "department": dept_col or carried, "start_date": date})
-            continue
-        # баннеры-подразделения обновляют протягиваемый отдел
-        if nr == "org":
-            carried = nm
-            continue
-        if pr == "org":
-            carried = ps
-            continue
-        if sr == "org" and not nm and not ps:
-            carried = sv
-            continue
-        # должности -> вакансия (ФИО пустое); берём ту ячейку, которую модель назвала должностью
-        if nr == "position":
-            out.append({"full_name": "", "position": nm, "department": dept_col or carried, "start_date": date})
-            continue
-        if pr == "position":
-            out.append({"full_name": "", "position": ps, "department": dept_col or carried, "start_date": date})
-            continue
-        # other/пусто -> пропуск
+        elif "position" in cbc:
+            out.append({"full_name": "", "position": cbc["position"],
+                        "department": dept_col or carried, "start_date": date})
+        elif "org" in cbc:
+            carried = cbc["org"]
+        # ничего значимого -> пропуск
     return out
 
 
