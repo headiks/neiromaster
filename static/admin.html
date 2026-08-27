@@ -357,6 +357,7 @@
 
         <div class="section-head-row" style="margin-top:34px;">
             <h2 class="section-title"><i data-lucide="file-text"></i> Документы</h2>
+            <button class="ghost-btn" onclick="assignChunksToStages()"><i data-lucide="layers"></i> Разложить чанки по этапам</button>
             <button class="ghost-btn" onclick="reanalyzeAll()"><i data-lucide="refresh-cw"></i> Переанализировать всё</button>
         </div>
         <div class="stage-hint">Ассистент сам относит документы к папкам по смыслу. Все документы попадают в общую базу «Все документы» независимо от папок.</div>
@@ -389,6 +390,7 @@
                 <select id="plan-select" onchange="onPlanSelect()"><option value="">— новый план —</option></select>
             </div>
             <button class="ghost-btn" onclick="newPlan()">＋ Новый план</button>
+            <button class="ghost-btn" onclick="fullTemplatePlan()"><i data-lucide="layout-template"></i> Полный шаблон</button>
             <button class="ghost-btn" onclick="duplicatePlan()">⧉ Дублировать</button>
             <button class="ghost-btn" onclick="deletePlan()"><i data-lucide="trash-2"></i> Удалить план</button>
         </div>
@@ -929,6 +931,13 @@
                 .then(() => { anyReanalyzing = true; bumpDocPolling(); });   // статусы «Переанализ…» подтянутся опросом
         }
 
+        function assignChunksToStages() {
+            if (!confirm('Разложить все чанки по этапам адаптации? Нужно после загрузки документов, чтобы генерация плана брала чанки нужного этапа.')) return;
+            setStatus('Раскладываю чанки по этапам…');
+            api('/chunks/assign-stages', { method: 'POST' })
+                .then(() => setStatus('Раскладка чанков по этапам запущена (идёт в фоне)'));
+        }
+
         // ---------------- Штатное расписание ----------------
         const STAFFING_LABELS = { full_name: 'ФИО', position: 'Должность', department: 'Отдел', start_date: 'Дата приёма/выхода' };
         const STAFFING_KEYS = ['full_name', 'position', 'department', 'start_date'];
@@ -1228,6 +1237,21 @@
             fillPlanMeta();
             renderStages();
             setStatus('');
+        }
+
+        function fullTemplatePlan() {
+            const title = prompt('Название полного шаблона (единый для всех профессий):', 'Универсальный план адаптации');
+            if (title === null) return;
+            setStatus('Создаю полный шаблон…');
+            api('/plans/template' + (title.trim() ? '?title=' + encodeURIComponent(title.trim()) : ''), { method: 'POST' })
+                .then(r => r.json()).then(p => {
+                    plan = p;
+                    fillPlanMeta();
+                    renderStages();
+                    document.getElementById('schedule-result').innerHTML = '';
+                    refreshPlanList().then(() => { document.getElementById('plan-select').value = p.plan_id; });
+                    setStatus('Полный шаблон создан — редактируйте под задачу');
+                });
         }
 
         function deletePlan() {

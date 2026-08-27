@@ -61,6 +61,51 @@ def catalog_stage(catalog_id: str) -> Optional[dict]:
     return None
 
 
+def catalog_stage_query(stage: dict) -> str:
+    """Смысловой «запрос этапа» — заголовок + описание + брифы и теги всех его подэтапов.
+    По нему чанки раскладываются по этапам (материализация «папок этапов»)."""
+    parts = [stage.get("title", ""), stage.get("description", "")]
+    for tpl in stage.get("substage_templates") or []:
+        parts += [tpl.get("title", ""), tpl.get("brief", "")]
+        parts += tpl.get("tags") or []
+    return ". ".join(p for p in parts if p)
+
+
+def build_full_template(title: str = "Универсальный план адаптации") -> dict:
+    """Полный универсальный шаблон плана из ВСЕГО каталога: все этапы и все подэтапы с их
+    описаниями, длительностями и временем. Профессионально-независимый — дальше человек
+    редактирует под задачу. Возвращает нормализованный план (без сохранения)."""
+    cat = load_catalog()
+    raw = {
+        "title": title,
+        "role": "",
+        "description": "Полный универсальный шаблон адаптации: все этапы и подэтапы каталога. "
+                       "Единый для всех профессий — специфику даёт база знаний при генерации. Редактируйте под задачу.",
+        "stages": [],
+    }
+    for st in cat.get("stages") or []:
+        raw_stage = {
+            "catalog_id": st["id"],
+            "title": st.get("title", ""),
+            "description": st.get("description", ""),
+            "anchor": st.get("anchor", "from_start"),
+            "duration": st.get("default_duration") or {"value": 1, "unit": "days"},
+            "substages": [],
+        }
+        for tpl in st.get("substage_templates") or []:
+            raw_stage["substages"].append({
+                "catalog_id": tpl["id"],
+                "title": tpl.get("title", ""),
+                "kind": tpl.get("kind", "message"),
+                "brief": tpl.get("brief", ""),
+                "tags": tpl.get("tags") or [],
+                "source": "template",
+                "schedule": {"day": 1, "time": tpl.get("default_time", "09:00")},
+            })
+        raw["stages"].append(raw_stage)
+    return normalize_plan(raw)
+
+
 # ---------- Длительности и расчёт дат ----------
 def stage_span_days(duration: dict) -> int:
     """
@@ -598,8 +643,10 @@ def pick_topics(stage: dict, substage: dict, topic_list: list) -> list:
     return picked or [t["slug"] for t in available]
 
 
-def generate_substage_message(stage: dict, substage: dict, topic_list: list) -> dict:
-    """Генерирует текст одного подэтапа. Ошибки не поднимает — возвращает status=error."""
+def generate_substage_message(stage: dict, substage: dict, topic_list: list, role: str = "") -> dict:
+    """Генерирует текст одного подэтапа. Ошибки не поднимает — возвращает status=error.
+    role — должность/профессия плана: из «папки этапа» (чанки, разложенные по этому этапу)
+    приоритет получают чанки этой профессии (механика приоритета по должности)."""
     import indexing
     from rag import big_llm
 
@@ -609,7 +656,8 @@ def generate_substage_message(stage: dict, substage: dict, topic_list: list) -> 
         picked = pick_topics(stage, substage, topic_list)
         result["topics_used"] = picked
 
-        chunks = indexing.search_chunks(_substage_query(stage, substage), picked, limit=CONTEXT_CHUNKS)
+        chunks = indexing.search_chunks(_substage_query(stage, substage), picked, limit=CONTEXT_CHUNKS,
+                                        plan_stage=stage.get("catalog_id"), position=role)
         result["sources"] = [{"source": c["source"], "folders": c.get("folders") or [],
                               "page": c["page"], "score": round(c["score"], 3)} for c in chunks]
 
@@ -720,7 +768,7 @@ def start_generation(plan: dict) -> dict:
                 )
                 _set_job(job_id, current=f"{item['stage']['title']} → {item['substage']['title']}",
                          done=index - 1)
-                payload = generate_substage_message(stage, substage, topic_list)
+                payload = generate_substage_message(stage, substage, topic_list, role=plan.get("role") or "")
                 if payload["status"] == "error":
                     errors += 1
                 generated[item["message_id"]] = payload
@@ -760,7 +808,8 @@ def regenerate_one(plan: dict, message_id: str) -> Optional[dict]:
     if substage is None:
         return None
 
-    payload = generate_substage_message(stage, substage, folders.list_folders(include_disabled=False))
+    payload = generate_substage_message(stage, substage, folders.list_folders(include_disabled=False),
+                                        role=plan.get("role") or "")
 
     schedule = load_schedule(plan["plan_id"])
     if schedule is None:

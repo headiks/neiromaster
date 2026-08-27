@@ -796,6 +796,25 @@ async def create_plan(req: PlanRequest):
     return plan
 
 
+@app.post("/plans/template", dependencies=admin_only)
+async def create_full_template(title: str | None = None):
+    """Создаёт полный универсальный шаблон плана из всего каталога (все этапы и подэтапы),
+    единый для всех профессий. Дальше редактируется как обычный план."""
+    plan = planner.build_full_template(title or "Универсальный план адаптации")
+    planner.save_plan(plan)
+    return plan
+
+
+@app.post("/chunks/assign-stages", dependencies=admin_only)
+def assign_chunks_to_stages():
+    """Материализация «папок этапов»: раскладывает все чанки по этапам каталога адаптации
+    (payload.plan_stages). Нужно после загрузки документов, чтобы генерация плана брала
+    чанки нужного этапа. Фоново — прогресс тянуть общей ручкой задач не нужно, операция
+    дешёвая (эмбеддинги этапов + косинус к готовым векторам)."""
+    _bg(indexing.assign_chunks_to_stages)
+    return {"status": "started"}
+
+
 @app.get("/plans/{plan_id}", dependencies=admin_only)
 async def get_plan(plan_id: str):
     plan = planner.load_plan(plan_id)

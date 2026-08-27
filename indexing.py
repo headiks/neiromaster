@@ -154,8 +154,9 @@ def file_hash(path: Path) -> str:
 # заметно медленнее. Индекс делает отбор по теме/источнику почти бесплатным,
 # поэтому двухступенчатый поиск (сначала темы, потом чанки внутри них) масштабируется.
 PAYLOAD_INDEXES = {
-    "folders": PayloadSchemaType.KEYWORD,    # массив slug'ов — MatchAny фильтрует по папкам
-    "stage_ids": PayloadSchemaType.KEYWORD,  # массив id этапов — для приоритезации по текущему этапу
+    "folders": PayloadSchemaType.KEYWORD,     # массив slug'ов — MatchAny фильтрует по папкам
+    "stage_ids": PayloadSchemaType.KEYWORD,   # массив id блоков знаний — приоритет по текущему этапу
+    "plan_stages": PayloadSchemaType.KEYWORD, # id этапов каталога адаптации — «папки этапов» для генерации плана
     "source": PayloadSchemaType.KEYWORD,
     "section": PayloadSchemaType.KEYWORD,
 }
@@ -370,25 +371,39 @@ def index_document(filepath: Path) -> dict:
         return {"filename": filename, "status": "error", "error": str(e)}
 
 
-def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: int = 6) -> list:
+def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: int = 6,
+                  plan_stage: Optional[str] = None, position: str = "") -> list:
     """
-    Поиск чанков с опциональным сужением до конкретных тем. Тем же приёмом, что и
-    в диалоге (rag.search), пользуется конструктор плана: сначала выбираем
-    темы, потом ищем только внутри них.
-    Возвращает [{"text", "source", "topic", "page", "score"}].
+    Поиск чанков с сужением до тем (папок) и до ЭТАПА каталога адаптации (plan_stage —
+    «папка этапа»: чанки, разложенные по этому этапу). Из двух похожих чанков приоритет
+    получает тот, чья профессия ближе к должности плана (position) — механика приоритета
+    по должности из rag. Если по этапу ничего нет (чанки ещё не разложены) — фолбэк без него.
+    Возвращает [{"text", "source", "folders", "section", "page", "score"}].
     """
     vector = get_embedding(query_text)
-    query_filter = None
+    musts = []
     if topic_slugs:
-        query_filter = Filter(must=[FieldCondition(key="folders", match=MatchAny(any=list(topic_slugs)))])
+        musts.append(FieldCondition(key="folders", match=MatchAny(any=list(topic_slugs))))
+    if plan_stage:
+        musts.append(FieldCondition(key="plan_stages", match=MatchValue(value=plan_stage)))
 
-    hits = client.query_points(
-        collection_name=COLLECTION_NAME,
-        query=vector,
-        limit=limit,
-        with_payload=True,
-        query_filter=query_filter,
-    ).points
+    # приоритет по профессии двигает нужные чанки вверх -> берём с запасом и переупорядочиваем
+    fetch = max(limit * 3, limit) if position else limit
+    hits = _query_chunks(vector, Filter(must=musts) if musts else None, fetch)
+    # Фолбэк: если фильтр по этапу пуст (чанки ещё не разложены по этапам) — ищем без него,
+    # чтобы генерация работала и до материализации «папок этапов».
+    if not hits and plan_stage:
+        musts = [m for m in musts if getattr(m, "key", None) != "plan_stages"]
+        hits = _query_chunks(vector, Filter(must=musts) if musts else None, fetch)
+
+    if position:
+        from rag import profession_delta, _prof_vec
+        try:
+            pv = _prof_vec(position)
+        except Exception:
+            pv = None
+        hits = sorted(hits, key=lambda h: h.score + profession_delta((h.payload or {}).get("profession") or "", pv),
+                      reverse=True)[:limit]
 
     return [{
         "text": h.payload.get("text", ""),
@@ -398,6 +413,53 @@ def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: in
         "page": h.payload.get("page"),
         "score": h.score,
     } for h in hits]
+
+
+# ---------- Материализация «папок этапов»: раскладка чанков по этапам каталога ----------
+PLAN_STAGE_MATCH = 0.45   # cos чанк↔этап каталога: чанк относим к этапу (мульти-лейбл)
+
+
+def _cos(a, b) -> float:
+    if not a or not b:
+        return 0.0
+    s = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return s / (na * nb) if na and nb else 0.0
+
+
+def assign_chunks_to_stages() -> dict:
+    """Раскладывает ВСЕ чанки по этапам каталога адаптации: каждому чанку проставляет
+    payload.plan_stages — id этапов, смыслу которых он соответствует (по близости к
+    «запросу этапа» = заголовок+описание+брифы подэтапов). Мульти-лейбл. Дёшево: только
+    эмбеддинги этапов (их 8) + косинус к готовым векторам чанков, без docling/LLM. Так
+    материализуются «папки этапов» для генерации плана по профессиям."""
+    import planner
+    cat = planner.load_catalog()
+    stage_vecs = [(st["id"], get_embedding(planner.catalog_stage_query(st)))
+                  for st in cat.get("stages") or []]
+    try:
+        client.create_payload_index(COLLECTION_NAME, field_name="plan_stages",
+                                     field_schema=PayloadSchemaType.KEYWORD)
+    except Exception:
+        pass
+
+    offset = None
+    touched = 0
+    while True:
+        batch, offset = client.scroll(
+            collection_name=COLLECTION_NAME, limit=256,
+            with_payload=False, with_vectors=True, offset=offset,
+        )
+        for p in batch:
+            ids = [sid for sid, sv in stage_vecs if _cos(p.vector, sv) >= PLAN_STAGE_MATCH]
+            client.set_payload(collection_name=COLLECTION_NAME,
+                               payload={"plan_stages": ids}, points=[p.id])
+            touched += 1
+        if offset is None:
+            break
+    _log("STAGES", f"чанков разложено по этапам: {touched} (этапов {len(stage_vecs)})")
+    return {"chunks": touched, "stages": len(stage_vecs)}
 
 
 def _vector_stats(vector) -> dict:
@@ -447,6 +509,7 @@ def get_document_chunks(filename: str) -> Optional[dict]:
             "page": payload.get("page"),
             "folders": payload.get("folders") or [],
             "stage_ids": payload.get("stage_ids") or [],
+            "plan_stages": payload.get("plan_stages") or [],
             "profession": payload.get("profession") or "",
             "length": payload.get("length"),
             "text": payload.get("text", ""),          # то, что реально ушло в эмбеддинг
