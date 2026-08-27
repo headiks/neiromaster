@@ -291,6 +291,56 @@ def search(question, limit=6, folder_slugs=None):
 RETRIEVE_MIN = 3   # достаточно кандидатов — не расширяем поиск на следующий уровень
 QUESTION_ROUTE_THRESHOLD = 0.35   # ниже — вопрос НЕ считаем отнесённым к папке (тогда общая база)
 
+# ---------- Приоритет по должности сотрудника ----------
+# Чанк несёт payload.profession — должность, для которой предназначен документ ("" = общий,
+# для всех). Из двух похожих чанков ближе к должности сотрудника должен оказаться тот, чья
+# профессия совпала с должностью. Совпадение — по СМЫСЛУ (эмбеддинг), а не по строке: «водитель»
+# на чанке ↔ «Водитель автомобиля (автосамосвал)» в профиле. Это приоритет, не жёсткий фильтр:
+# общие чанки (profession="") доступны всем без буста; чужая профессия — штраф, а не отсев.
+PROF_MATCH_SIM = 0.62      # cos >= — профессия чанка совпала с должностью сотрудника
+PROF_MISMATCH_SIM = 0.45   # cos <  — чанк явно для ДРУГОЙ профессии
+PROF_BONUS = 0.12
+PROF_PENALTY = 0.12
+
+_prof_vec_cache: dict = {}   # текст профессии -> эмбеддинг (профессий немного, кэш живёт в процессе)
+
+
+def _cos(a, b) -> float:
+    if not a or not b:
+        return 0.0
+    s = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return s / (na * nb) if na and nb else 0.0
+
+
+def _prof_vec(text: str):
+    v = _prof_vec_cache.get(text)
+    if v is None:
+        v = embed(text)
+        _prof_vec_cache[text] = v
+    return v
+
+
+def _prof_delta_from_sim(sim: float) -> float:
+    """Чистое правило приоритета по близости профессии чанка к должности сотрудника."""
+    if sim >= PROF_MATCH_SIM:
+        return PROF_BONUS
+    if sim < PROF_MISMATCH_SIM:
+        return -PROF_PENALTY
+    return 0.0
+
+
+def profession_delta(chunk_profession: str, position_vec) -> float:
+    """Поправка к скору чанка по совпадению его профессии с должностью сотрудника.
+    Пустая профессия (общий документ) или нет должности — 0 (нейтрально)."""
+    if not chunk_profession or position_vec is None:
+        return 0.0
+    try:
+        return _prof_delta_from_sim(_cos(position_vec, _prof_vec(chunk_profession)))
+    except Exception:
+        return 0.0
+
 
 def _folders_for_stages(stage_ids):
     if not stage_ids:
@@ -330,9 +380,10 @@ def fetch_neighbors(source, chunk_index, span=1):
         return []
 
 
-def cascade_search(question, current_stage_ids=None, limit=8):
+def cascade_search(question, current_stage_ids=None, limit=8, position=None):
     """L1 релевантные папки -> L3 папки текущего этапа -> L4 вся база. Приоритет —
-    свежесть документа и текущий этап (буст, не жёсткий фильтр — ТЗ §6, §24)."""
+    свежесть документа, текущий этап и должность сотрудника (буст, не жёсткий фильтр —
+    ТЗ §6, §24). position — должность сотрудника из профиля (приоритет по профессии чанка)."""
     matched = classify.match_folders(question, top_k=3, threshold=QUESTION_ROUTE_THRESHOLD)
     folder_slugs = [m[0] for m in matched]
     cands = search(question, limit=limit, folder_slugs=folder_slugs or None)
@@ -350,10 +401,18 @@ def cascade_search(question, current_stage_ids=None, limit=8):
         cands = _merge(cands, search(question, limit=limit, folder_slugs=None))
 
     sset = set(current_stage_ids or [])
+    position_vec = None
+    if (position or "").strip():
+        try:
+            position_vec = _prof_vec(position.strip())
+        except Exception as e:
+            log("SEARCH", f"эмбеддинг должности не получен ({e}) — без приоритета по профессии")
     for p in cands:
         pl = p.get("payload") or {}
-        boost = 0.05 if sset & set(pl.get("stage_ids") or []) else 0.0
-        p["_adj"] = p["score"] + boost
+        stage_boost = 0.05 if sset & set(pl.get("stage_ids") or []) else 0.0
+        prof = profession_delta(pl.get("profession") or "", position_vec)
+        p["_prof"] = prof                       # переносится в rerank как приоритет должности
+        p["_adj"] = p["score"] + stage_boost + prof
         p["_when"] = pl.get("uploaded_at") or ""
     cands.sort(key=lambda p: (p["_adj"], p["_when"]), reverse=True)
     return cands[:max(limit, 6)]
@@ -426,14 +485,16 @@ def rerank(question, candidates):
                 log("RERANK", f"Fallback: использован векторный скор {vector_score} -> {relevance:.3f}")
             else:
                 relevance = 0.0
-        # Ограничиваем
-        relevance = max(0.0, min(1.0, relevance))
+        # Приоритет по должности сотрудника: из двух одинаково релевантных фрагментов выше
+        # окажется тот, чья профессия совпала с должностью; фрагмент для чужой профессии —
+        # ниже. Общие фрагменты (profession="") нейтральны (_prof=0).
+        relevance = max(0.0, min(1.0, relevance + c.get("_prof", 0.0)))
         scored.append({
             "text": fragment,
             "relevance": relevance,
             "vector_score": c["score"],
         })
-        log("RERANK", f"Кандидат {idx+1}: релевантность={relevance:.3f}, векторный скор={c['score']:.3f}")
+        log("RERANK", f"Кандидат {idx+1}: релевантность={relevance:.3f}, векторный скор={c['score']:.3f}, приоритет должности={c.get('_prof', 0.0):+.2f}")
     sorted_scored = sorted(scored, key=lambda x: x["relevance"], reverse=True)
     log("RERANK", f"Результат реранжирования (отсортировано): {[(s['relevance'], s['text'][:40]) for s in sorted_scored]}")
     return sorted_scored
@@ -457,12 +518,14 @@ def generate_answer(question, context_fragments):
     return answer
 
 # ---------- Основная функция ----------
-def handle_question(question, history=None, current_stage_ids=None):
+def handle_question(question, history=None, current_stage_ids=None, position=None):
     """
     history — список предыдущих реплик текущего диалога вида
     [{"question": "...", "answer": "..."}, ...] от старых к новым.
     current_stage_ids — id этапов текущего этапа обучения пользователя (из прогресса);
     используются как приоритет поиска, но не ограничивают его (ТЗ §6).
+    position — должность сотрудника из профиля: из двух похожих чанков приоритет получает
+    тот, чья профессия ближе к должности (приоритет, не фильтр — общие документы доступны всем).
     """
     log("START", f"Обработка вопроса: {question}")
     total_start = time.time()
@@ -506,7 +569,7 @@ def handle_question(question, history=None, current_stage_ids=None):
             "error": None
         }
 
-    candidates = cascade_search(effective_question, current_stage_ids=current_stage_ids)
+    candidates = cascade_search(effective_question, current_stage_ids=current_stage_ids, position=position)
     if not candidates:
         return {
             **base_result,

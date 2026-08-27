@@ -270,6 +270,9 @@ def index_document(filepath: Path) -> dict:
         doc_cls = classify.classify_document(summary)
         doc_folders = doc_cls["folders"]
 
+        # ---- Профессия документа (приоритет поиска по должности сотрудника) ----
+        doc_profession = classify.detect_profession(summary)
+
         # ---- Markdown-версия (плоско) ----
         md_path = CONVERTED_DIR / f"{filepath.stem}.md"
         md_path.write_text(markdown_text, encoding="utf-8")
@@ -279,6 +282,7 @@ def index_document(filepath: Path) -> dict:
             summary=summary,
             folders=doc_folders,
             stage_ids=doc_cls["stage_ids"],
+            profession=doc_profession,
             similar=similar,
             path=filename,
             markdown_path=md_path.name,
@@ -328,6 +332,7 @@ def index_document(filepath: Path) -> dict:
                         "source": filename,
                         "folders": chunk_cls["folders"],
                         "stage_ids": chunk_cls["stage_ids"],
+                        "profession": doc_profession,
                         "section": section,
                         "headings": headings,
                         "page": page_no,
@@ -353,7 +358,8 @@ def index_document(filepath: Path) -> dict:
         _update_registry(
             filename, status="indexed", chunks=len(points), error=None,
             indexed_in_seconds=round(elapsed, 2), folders=doc_folders,
-            stage_ids=doc_cls["stage_ids"], path=filename, markdown_path=md_path.name,
+            stage_ids=doc_cls["stage_ids"], profession=doc_profession,
+            path=filename, markdown_path=md_path.name,
         )
         _log("DONE", f"{filename}: {len(points)} чанков за {elapsed:.2f} сек, папки: {doc_folders or '(общая база)'}")
         return {"filename": filename, "status": "indexed", "chunks": len(points),
@@ -441,6 +447,7 @@ def get_document_chunks(filename: str) -> Optional[dict]:
             "page": payload.get("page"),
             "folders": payload.get("folders") or [],
             "stage_ids": payload.get("stage_ids") or [],
+            "profession": payload.get("profession") or "",
             "length": payload.get("length"),
             "text": payload.get("text", ""),          # то, что реально ушло в эмбеддинг
             "raw_text": payload.get("raw_text", ""),   # исходный текст пункта без контекста заголовков
@@ -719,6 +726,7 @@ def reanalyze_document(filename: str) -> dict:
         summary = (entry or {}).get("summary") or ""
         doc_cls = classify.classify_document(summary) if summary else {"folders": [], "stage_ids": []}
         doc_folders = doc_cls["folders"]
+        doc_profession = classify.detect_profession(summary) if summary else ""
 
         offset = None
         touched = 0
@@ -732,13 +740,14 @@ def reanalyze_document(filename: str) -> dict:
                 base_text = (p.payload or {}).get("raw_text") or (p.payload or {}).get("text") or ""
                 cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
                 client.set_payload(collection_name=COLLECTION_NAME,
-                                   payload={"folders": cc["folders"], "stage_ids": cc["stage_ids"]},
+                                   payload={"folders": cc["folders"], "stage_ids": cc["stage_ids"],
+                                            "profession": doc_profession},
                                    points=[p.id])
                 touched += 1
             if offset is None:
                 break
         _update_registry(filename, folders=doc_folders, stage_ids=doc_cls["stage_ids"],
-                         status="indexed", error=None)
+                         profession=doc_profession, status="indexed", error=None)
         return {"filename": filename, "folders": doc_folders, "chunks": touched}
     except Exception as e:
         _log("REANALYZE", f"{filename}: ошибка переанализа ({e})")
