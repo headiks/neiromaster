@@ -796,6 +796,25 @@ async def create_plan(req: PlanRequest):
     return plan
 
 
+@app.post("/plans/template", dependencies=admin_only)
+async def create_full_template(title: str | None = None):
+    """Создаёт полный универсальный шаблон плана из всего каталога (все этапы и подэтапы),
+    единый для всех профессий. Дальше редактируется как обычный план."""
+    plan = planner.build_full_template(title or "Универсальный план адаптации")
+    planner.save_plan(plan)
+    return plan
+
+
+@app.post("/chunks/assign-stages", dependencies=admin_only)
+def assign_chunks_to_stages():
+    """Материализация «папок этапов»: раскладывает все чанки по этапам каталога адаптации
+    (payload.plan_stages). Нужно после загрузки документов, чтобы генерация плана брала
+    чанки нужного этапа. Фоново — прогресс тянуть общей ручкой задач не нужно, операция
+    дешёвая (эмбеддинги этапов + косинус к готовым векторам)."""
+    _bg(indexing.assign_chunks_to_stages)
+    return {"status": "started"}
+
+
 @app.get("/plans/{plan_id}", dependencies=admin_only)
 async def get_plan(plan_id: str):
     plan = planner.load_plan(plan_id)
@@ -834,18 +853,28 @@ async def duplicate_plan(plan_id: str, title: str | None = None):
     return plan
 
 
+def _staffing_positions() -> list:
+    """Уникальные должности сотрудников из штатки — под каждую генерируется свой контент плана."""
+    seen = []
+    for u in users.list_users():
+        pos = (u.get("position") or "").strip()
+        if pos and pos not in seen:
+            seen.append(pos)
+    return seen
+
+
 @app.post("/plans/{plan_id}/generate", dependencies=admin_only)
 async def generate_plan(plan_id: str):
     """
-    Запускает фоновую генерацию автоответов по всем подэтапам.
-    Возвращает описание задачи — прогресс тянуть через GET /jobs/{job_id}.
+    Запускает фоновую генерацию контента плана. План один; контент собирается под КАЖДУЮ
+    уникальную должность из штатки (плюс общее расписание). Прогресс — через GET /jobs/{job_id}.
     """
     plan = planner.load_plan(plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="План не найден")
     if not any(s.get("substages") for s in plan.get("stages") or []):
         raise HTTPException(status_code=400, detail="В плане нет ни одного подэтапа")
-    return planner.start_generation(plan)
+    return planner.start_generation(plan, positions=_staffing_positions())
 
 
 @app.get("/jobs/{job_id}", dependencies=admin_only)
@@ -857,20 +886,27 @@ async def get_job(job_id: str):
 
 
 @app.get("/plans/{plan_id}/schedule", dependencies=admin_only)
-async def get_schedule(plan_id: str):
-    schedule = planner.load_schedule(plan_id)
+async def get_schedule(plan_id: str, profession: str | None = None):
+    """Расписание плана. profession — показать вариант под конкретную должность (иначе общий)."""
+    schedule = planner.load_schedule(plan_id, profession or "")
     if schedule is None:
         raise HTTPException(status_code=404, detail="Расписание ещё не сгенерировано")
     return schedule
 
 
+@app.get("/plans/{plan_id}/professions", dependencies=admin_only)
+async def get_plan_professions(plan_id: str):
+    """Профессии, под которые уже сгенерированы отдельные расписания."""
+    return {"professions": planner.list_schedule_professions(plan_id)}
+
+
 @app.post("/plans/{plan_id}/messages/{message_id}/regenerate", dependencies=admin_only)
-def regenerate_message(plan_id: str, message_id: str):
-    """Перегенерация одного подэтапа — без прогона всего плана."""
+def regenerate_message(plan_id: str, message_id: str, profession: str | None = None):
+    """Перегенерация одного подэтапа — без прогона всего плана. profession — какое расписание."""
     plan = planner.load_plan(plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="План не найден")
-    message = planner.regenerate_one(plan, message_id)
+    message = planner.regenerate_one(plan, message_id, profession or "")
     if message is None:
         raise HTTPException(status_code=404, detail="Подэтап не найден в плане")
     return message

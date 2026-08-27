@@ -154,8 +154,11 @@ def file_hash(path: Path) -> str:
 # заметно медленнее. Индекс делает отбор по теме/источнику почти бесплатным,
 # поэтому двухступенчатый поиск (сначала темы, потом чанки внутри них) масштабируется.
 PAYLOAD_INDEXES = {
-    "folders": PayloadSchemaType.KEYWORD,    # массив slug'ов — MatchAny фильтрует по папкам
-    "stage_ids": PayloadSchemaType.KEYWORD,  # массив id этапов — для приоритезации по текущему этапу
+    "folders": PayloadSchemaType.KEYWORD,        # массив slug'ов — MatchAny фильтрует по папкам
+    "stage_ids": PayloadSchemaType.KEYWORD,      # массив id блоков знаний — приоритет по текущему этапу
+    "plan_stages": PayloadSchemaType.KEYWORD,    # id этапов каталога — «папки этапов» для генерации плана
+    "plan_substages": PayloadSchemaType.KEYWORD, # id подэтапов каталога — «папки подэтапов» (тоньше этапа)
+    "meaningful": PayloadSchemaType.BOOL,        # содержательный чанк (мусор в распределение не идёт)
     "source": PayloadSchemaType.KEYWORD,
     "section": PayloadSchemaType.KEYWORD,
 }
@@ -321,7 +324,13 @@ def index_document(filepath: Path) -> dict:
                 prev_tail = raw_text[-OVERLAP_CHARS:]
 
                 vec = get_embedding(text_for_embedding)
-                chunk_cls = classify.classify_chunk(base_text, doc_folders, vec=vec)
+                # Смысловая нагрузка: служебный мусор (заголовок, номер страницы, оглавление)
+                # не распределяем по папкам/профессии — только содержательные чанки.
+                meaningful = classify.is_meaningful(base_text)
+                chunk_cls = classify.classify_chunk(base_text, doc_folders, vec=vec) if meaningful \
+                    else {"folders": [], "stage_ids": []}
+                # Профессия — ПЕР-ЧАНК с учётом контекста всего документа (не одна метка на документ).
+                chunk_prof = classify.chunk_profession(base_text, summary, doc_profession) if meaningful else ""
                 point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{filename}-{src_hash}-{seg_index}"))
                 points.append(PointStruct(
                     id=point_id,
@@ -330,9 +339,10 @@ def index_document(filepath: Path) -> dict:
                         "text": text_for_embedding,
                         "raw_text": raw_text,
                         "source": filename,
+                        "meaningful": meaningful,
                         "folders": chunk_cls["folders"],
                         "stage_ids": chunk_cls["stage_ids"],
-                        "profession": doc_profession,
+                        "profession": chunk_prof,
                         "section": section,
                         "headings": headings,
                         "page": page_no,
@@ -370,25 +380,49 @@ def index_document(filepath: Path) -> dict:
         return {"filename": filename, "status": "error", "error": str(e)}
 
 
-def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: int = 6) -> list:
+def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: int = 6,
+                  plan_stage: Optional[str] = None, position: str = "") -> list:
     """
-    Поиск чанков с опциональным сужением до конкретных тем. Тем же приёмом, что и
-    в диалоге (rag.search), пользуется конструктор плана: сначала выбираем
-    темы, потом ищем только внутри них.
-    Возвращает [{"text", "source", "topic", "page", "score"}].
+    Поиск чанков с сужением до тем (папок) и до ЭТАПА каталога адаптации (plan_stage —
+    «папка этапа»: чанки, разложенные по этому этапу). Из двух похожих чанков приоритет
+    получает тот, чья профессия ближе к должности плана (position) — механика приоритета
+    по должности из rag. Если по этапу ничего нет (чанки ещё не разложены) — фолбэк без него.
+    Возвращает [{"text", "source", "folders", "section", "page", "score"}].
     """
     vector = get_embedding(query_text)
-    query_filter = None
+    # Только содержательные чанки (мусор — заголовки/номера страниц — в генерацию не идёт).
+    # meaningful != False ловит и старые чанки без поля (там его просто нет).
+    base = [FieldCondition(key="meaningful", match=MatchValue(value=True))]
     if topic_slugs:
-        query_filter = Filter(must=[FieldCondition(key="folders", match=MatchAny(any=list(topic_slugs)))])
+        base.append(FieldCondition(key="folders", match=MatchAny(any=list(topic_slugs))))
 
-    hits = client.query_points(
-        collection_name=COLLECTION_NAME,
-        query=vector,
-        limit=limit,
-        with_payload=True,
-        query_filter=query_filter,
-    ).points
+    fetch = max(limit * 3, limit) if position else limit
+    # Сужение сверху вниз: подэтап -> этап -> без сужения. Первый непустой уровень выигрывает,
+    # чтобы генерация работала и до полной раскладки «папок подэтапов».
+    scope_filters = []
+    if plan_substage:
+        scope_filters.append(FieldCondition(key="plan_substages", match=MatchValue(value=plan_substage)))
+    if plan_stage:
+        scope_filters.append(FieldCondition(key="plan_stages", match=MatchValue(value=plan_stage)))
+    hits = []
+    for scope in scope_filters:
+        hits = _query_chunks(vector, Filter(must=base + [scope]), fetch)
+        if hits:
+            break
+    if not hits:
+        hits = _query_chunks(vector, Filter(must=base) if base else None, fetch)
+    # Совсем пусто (старые чанки без meaningful) — ищем без базового фильтра.
+    if not hits:
+        hits = _query_chunks(vector, None, fetch)
+
+    if position:
+        from rag import profession_delta, _prof_vec
+        try:
+            pv = _prof_vec(position)
+        except Exception:
+            pv = None
+        hits = sorted(hits, key=lambda h: h.score + profession_delta((h.payload or {}).get("profession") or "", pv),
+                      reverse=True)[:limit]
 
     return [{
         "text": h.payload.get("text", ""),
@@ -398,6 +432,67 @@ def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: in
         "page": h.payload.get("page"),
         "score": h.score,
     } for h in hits]
+
+
+# ---------- Материализация «папок этапов»: раскладка чанков по этапам каталога ----------
+PLAN_STAGE_MATCH = 0.45   # cos чанк↔этап каталога: чанк относим к этапу (мульти-лейбл)
+
+
+def _cos(a, b) -> float:
+    if not a or not b:
+        return 0.0
+    s = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return s / (na * nb) if na and nb else 0.0
+
+
+def assign_chunks_to_stages() -> dict:
+    """Раскладывает содержательные чанки по этапам И подэтапам каталога адаптации: каждому
+    чанку проставляет payload.plan_stages и payload.plan_substages — id, смыслу которых он
+    соответствует (по близости к «запросу этапа/подэтапа»). Мульти-лейбл: один чанк (и один
+    документ) может относиться к нескольким этапам и подэтапам. Служебный мусор (meaningful=False)
+    пропускается — метки пустые. Дёшево: эмбеддинги этапов/подэтапов + косинус к готовым векторам."""
+    import planner
+    cat = planner.load_catalog()
+    stage_vecs = []       # [(stage_id, vec)]
+    sub_vecs = []         # [(stage_id, sub_id, vec)]
+    for st in cat.get("stages") or []:
+        stage_vecs.append((st["id"], get_embedding(planner.catalog_stage_query(st))))
+        for sub in st.get("substage_templates") or []:
+            sub_vecs.append((st["id"], sub["id"], get_embedding(planner.catalog_substage_query(st, sub))))
+    for field in ("plan_stages", "plan_substages"):
+        try:
+            client.create_payload_index(COLLECTION_NAME, field_name=field,
+                                         field_schema=PayloadSchemaType.KEYWORD)
+        except Exception:
+            pass
+
+    offset = None
+    touched = 0
+    while True:
+        batch, offset = client.scroll(
+            collection_name=COLLECTION_NAME, limit=256,
+            with_payload=True, with_vectors=True, offset=offset,
+        )
+        for p in batch:
+            if (p.payload or {}).get("meaningful") is False:   # мусор не распределяем
+                client.set_payload(collection_name=COLLECTION_NAME,
+                                   payload={"plan_stages": [], "plan_substages": []}, points=[p.id])
+                touched += 1
+                continue
+            subs = [(stid, subid) for stid, subid, sv in sub_vecs if _cos(p.vector, sv) >= PLAN_STAGE_MATCH]
+            stages = {sid for sid, sv in stage_vecs if _cos(p.vector, sv) >= PLAN_STAGE_MATCH}
+            stages |= {stid for stid, _ in subs}   # этап выводится и из совпавших подэтапов
+            client.set_payload(collection_name=COLLECTION_NAME,
+                               payload={"plan_stages": sorted(stages),
+                                        "plan_substages": sorted({s for _, s in subs})},
+                               points=[p.id])
+            touched += 1
+        if offset is None:
+            break
+    _log("STAGES", f"чанков разложено: {touched} (этапов {len(stage_vecs)}, подэтапов {len(sub_vecs)})")
+    return {"chunks": touched, "stages": len(stage_vecs), "substages": len(sub_vecs)}
 
 
 def _vector_stats(vector) -> dict:
@@ -445,8 +540,11 @@ def get_document_chunks(filename: str) -> Optional[dict]:
             "section": payload.get("section"),
             "headings": payload.get("headings") or [],
             "page": payload.get("page"),
+            "meaningful": payload.get("meaningful", True),
             "folders": payload.get("folders") or [],
             "stage_ids": payload.get("stage_ids") or [],
+            "plan_stages": payload.get("plan_stages") or [],
+            "plan_substages": payload.get("plan_substages") or [],
             "profession": payload.get("profession") or "",
             "length": payload.get("length"),
             "text": payload.get("text", ""),          # то, что реально ушло в эмбеддинг
@@ -738,10 +836,16 @@ def reanalyze_document(filename: str) -> dict:
             )
             for p in batch:
                 base_text = (p.payload or {}).get("raw_text") or (p.payload or {}).get("text") or ""
-                cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
+                meaningful = classify.is_meaningful(base_text)
+                if meaningful:
+                    cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
+                    chunk_prof = classify.chunk_profession(base_text, summary, doc_profession)
+                else:
+                    cc = {"folders": [], "stage_ids": []}
+                    chunk_prof = ""
                 client.set_payload(collection_name=COLLECTION_NAME,
-                                   payload={"folders": cc["folders"], "stage_ids": cc["stage_ids"],
-                                            "profession": doc_profession},
+                                   payload={"meaningful": meaningful, "folders": cc["folders"],
+                                            "stage_ids": cc["stage_ids"], "profession": chunk_prof},
                                    points=[p.id])
                 touched += 1
             if offset is None:
