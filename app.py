@@ -28,6 +28,7 @@ import staffing
 import employees as adaptation
 import mailing
 import sender
+import documents
 from indexing import DOCS_DIR
 
 
@@ -122,6 +123,13 @@ async def lifespan(app: FastAPI):
         sender.start_scheduler()
     except Exception as e:
         print(f"Предупреждение: служба рассылки (этап 8) не запущена: {e}")
+
+    # Единый реестр метаданных документов (PostgreSQL): дедуп по хэшу + экран
+    # «этапы ↔ документы». Таблица создаётся, если её ещё нет.
+    try:
+        documents.init()
+    except Exception as e:
+        print(f"Предупреждение: реестр документов не инициализирован: {e}")
     yield
 
 
@@ -326,6 +334,32 @@ async def tester_page(request: Request):
     return HTMLResponse(_read_static("tester.html"))
 
 
+@app.get("/documents-board", response_class=HTMLResponse)
+async def documents_board_page(request: Request):
+    """Экран «этапы ↔ документы»: какие документы закреплены за этапами и подэтапами."""
+    user = auth.get_session_user(request.cookies.get(auth.COOKIE_NAME))
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.get("must_change_credentials"):
+        return RedirectResponse(url="/setup", status_code=303)
+    if not users.is_admin(user):
+        return RedirectResponse(url="/", status_code=303)
+    return HTMLResponse(_read_static("documents_board.html"))
+
+
+@app.get("/documents-table", response_class=HTMLResponse)
+async def documents_table_page(request: Request):
+    """Табличный просмотр метаданных обработанных файлов (реестр documents)."""
+    user = auth.get_session_user(request.cookies.get(auth.COOKIE_NAME))
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.get("must_change_credentials"):
+        return RedirectResponse(url="/setup", status_code=303)
+    if not users.is_admin(user):
+        return RedirectResponse(url="/", status_code=303)
+    return HTMLResponse(_read_static("documents_table.html"))
+
+
 # ---------- Вход, регистрация, свой профиль ----------
 @app.post("/api/login")
 async def api_login(req: LoginRequest, request: Request, response: Response):
@@ -511,6 +545,36 @@ async def get_documents():
     return {"documents": indexing.list_documents()}
 
 
+@app.get("/documents/board", dependencies=admin_only)
+async def get_documents_board():
+    """Данные экрана «этапы ↔ документы»: этапы, подэтапы и относящиеся к ним
+    документы (по метаданным из реестра) + документы без уверенной привязки."""
+    return documents.board()
+
+
+@app.get("/documents/table", dependencies=admin_only)
+async def get_documents_table():
+    """Табличные данные по обработанным файлам из реестра метаданных (PostgreSQL):
+    все поля, кроме тяжёлого вектора (у него — только длина)."""
+    return {"documents": documents.list_meta()}
+
+
+@app.post("/documents/{filename}/reindex", dependencies=admin_only)
+async def reindex_document(filename: str):
+    """Переанализ документа (без повторного docling): обновляет папки/этапы по чанкам
+    и синхронизирует запись в реестре метаданных."""
+    result = indexing.reanalyze_document(filename)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    try:
+        doc = next((d for d in indexing.list_documents() if d.get("filename") == filename), {})
+        documents.update_assignment_by_filename(
+            filename, result.get("folders") or [], doc.get("stage_ids") or [])
+    except Exception:
+        pass
+    return result
+
+
 @app.post("/documents/upload", dependencies=admin_only)
 async def upload_document(file: UploadFile = File(...)):
     """
@@ -526,6 +590,19 @@ async def upload_document(file: UploadFile = File(...)):
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413,
                             detail=f"Файл превышает лимит {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ")
+
+    # Дедупликация по содержимому (sha256): тот же файл не грузим и не индексируем заново.
+    try:
+        existing = documents.find_by_hash(documents.hash_bytes(content))
+    except Exception:
+        existing = None   # реестр недоступен — не блокируем загрузку
+    if existing:
+        return JSONResponse(status_code=200, content={
+            "duplicate": True, "filename": existing["filename"],
+            "uploaded_at": existing.get("uploaded_at"),
+            "message": f"Такой файл уже загружен ранее ({existing['filename']}) — повторная обработка не требуется",
+        })
+
     try:
         filepath = indexing.save_uploaded_file(file.filename, content)
     except ValueError as e:
@@ -601,6 +678,10 @@ async def remove_document(filename: str):
     existed = indexing.delete_document(filename)
     if not existed:
         raise HTTPException(status_code=404, detail="Документ не найден")
+    try:
+        documents.remove_by_filename(filename)
+    except Exception:
+        pass
     return {"filename": filename, "deleted": True}
 
 
