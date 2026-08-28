@@ -42,6 +42,7 @@ from docling_core.types.doc.document import DoclingDocument
 
 import classify
 import folders
+import documents
 from config import (
     DOCS_DIR, CONVERTED_DIR, CACHE_DIR, REGISTRY_PATH,
     SUPPORTED_EXT, MAX_UPLOAD_BYTES,
@@ -371,6 +372,18 @@ def index_document(filepath: Path) -> dict:
             stage_ids=doc_cls["stage_ids"], profession=doc_profession,
             path=filename, markdown_path=md_path.name,
         )
+        # Единый реестр метаданных в PostgreSQL (дедуп по хэшу + экран «этапы↔документы»).
+        # Сбой реестра не должен ронять индексацию — документ уже в Qdrant и в registry.json.
+        try:
+            documents.record(
+                sha256=src_hash, filename=filename, summary=summary,
+                folders=doc_folders, stage_ids=doc_cls["stage_ids"],
+                size_bytes=filepath.stat().st_size, mime=filepath.suffix.lstrip(".").lower(),
+                uploaded_at=uploaded_at,
+            )
+        except Exception as e:
+            _log("DOCMETA", f"не удалось записать метаданные {filename} в БД: {e}")
+
         _log("DONE", f"{filename}: {len(points)} чанков за {elapsed:.2f} сек, папки: {doc_folders or '(общая база)'}")
         return {"filename": filename, "status": "indexed", "chunks": len(points),
                 "elapsed": elapsed, "folders": doc_folders, "similar": similar}
@@ -631,6 +644,12 @@ def delete_document(filename: str, remove_file: bool = True) -> bool:
         reg = _load_registry()
         existed = reg.pop(filename, None) is not None
         _save_registry(reg)
+
+    # Синхронно убираем строку из реестра метаданных, чтобы экран не показывал удалённое.
+    try:
+        documents.remove_by_filename(filename)
+    except Exception as e:
+        _log("DELETE", f"метаданные {filename} из БД: {e}")
     return existed
 
 
