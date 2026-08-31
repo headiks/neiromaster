@@ -332,6 +332,9 @@ def index_document(filepath: Path) -> dict:
                     else {"folders": [], "stage_ids": []}
                 # Профессия — ПЕР-ЧАНК с учётом контекста всего документа (не одна метка на документ).
                 chunk_prof = classify.chunk_profession(base_text, summary, doc_profession) if meaningful else ""
+                # Этапы/подэтапы каталога — сразу при индексации: чанк готов для персональных
+                # планов без отдельной ручной раскладки. Мусор (meaningful=False) не тегируем.
+                plan_stages, plan_substages = _stage_tags(vec) if meaningful else ([], [])
                 point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{filename}-{src_hash}-{seg_index}"))
                 points.append(PointStruct(
                     id=point_id,
@@ -343,6 +346,8 @@ def index_document(filepath: Path) -> dict:
                         "meaningful": meaningful,
                         "folders": chunk_cls["folders"],
                         "stage_ids": chunk_cls["stage_ids"],
+                        "plan_stages": plan_stages,
+                        "plan_substages": plan_substages,
                         "profession": chunk_prof,
                         "section": section,
                         "headings": headings,
@@ -394,7 +399,8 @@ def index_document(filepath: Path) -> dict:
 
 
 def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: int = 6,
-                  plan_stage: Optional[str] = None, position: str = "") -> list:
+                  plan_stage: Optional[str] = None, plan_substage: Optional[str] = None,
+                  position: str = "") -> list:
     """
     Поиск чанков с сужением до тем (папок) и до ЭТАПА каталога адаптации (plan_stage —
     «папка этапа»: чанки, разложенные по этому этапу). Из двух похожих чанков приоритет
@@ -460,20 +466,47 @@ def _cos(a, b) -> float:
     return s / (na * nb) if na and nb else 0.0
 
 
+_CATALOG_STAGE_VECS = None   # ((stage_id, vec)...), ((stage_id, sub_id, vec)...)
+
+
+def _catalog_stage_vectors():
+    """Эмбеддинги «запросов» этапов и подэтапов каталога. Кэш на время процесса.
+    ponytail: сброс кэша — рестарт или reset_stage_vectors(); каталог меняется редко."""
+    global _CATALOG_STAGE_VECS
+    if _CATALOG_STAGE_VECS is None:
+        import planner
+        cat = planner.load_catalog()
+        sv, subv = [], []
+        for st in cat.get("stages") or []:
+            sv.append((st["id"], get_embedding(planner.catalog_stage_query(st))))
+            for sub in st.get("substage_templates") or []:
+                subv.append((st["id"], sub["id"], get_embedding(planner.catalog_substage_query(st, sub))))
+        _CATALOG_STAGE_VECS = (sv, subv)
+    return _CATALOG_STAGE_VECS
+
+
+def reset_stage_vectors():
+    global _CATALOG_STAGE_VECS
+    _CATALOG_STAGE_VECS = None
+
+
+def _stage_tags(vec):
+    """(plan_stages[], plan_substages[]) для вектора чанка: подэтапы/этапы каталога,
+    к которым чанк близок (cos >= PLAN_STAGE_MATCH). Этап выводится и из совпавших подэтапов."""
+    sv, subv = _catalog_stage_vectors()
+    subs = [(stid, subid) for stid, subid, s in subv if _cos(vec, s) >= PLAN_STAGE_MATCH]
+    stages = {sid for sid, s in sv if _cos(vec, s) >= PLAN_STAGE_MATCH} | {stid for stid, _ in subs}
+    return sorted(stages), sorted({s for _, s in subs})
+
+
 def assign_chunks_to_stages() -> dict:
     """Раскладывает содержательные чанки по этапам И подэтапам каталога адаптации: каждому
     чанку проставляет payload.plan_stages и payload.plan_substages — id, смыслу которых он
     соответствует (по близости к «запросу этапа/подэтапа»). Мульти-лейбл: один чанк (и один
     документ) может относиться к нескольким этапам и подэтапам. Служебный мусор (meaningful=False)
     пропускается — метки пустые. Дёшево: эмбеддинги этапов/подэтапов + косинус к готовым векторам."""
-    import planner
-    cat = planner.load_catalog()
-    stage_vecs = []       # [(stage_id, vec)]
-    sub_vecs = []         # [(stage_id, sub_id, vec)]
-    for st in cat.get("stages") or []:
-        stage_vecs.append((st["id"], get_embedding(planner.catalog_stage_query(st))))
-        for sub in st.get("substage_templates") or []:
-            sub_vecs.append((st["id"], sub["id"], get_embedding(planner.catalog_substage_query(st, sub))))
+    reset_stage_vectors()                       # каталог мог измениться — пересчитать векторы
+    stage_vecs, sub_vecs = _catalog_stage_vectors()
     for field in ("plan_stages", "plan_substages"):
         try:
             client.create_payload_index(COLLECTION_NAME, field_name=field,
@@ -494,12 +527,9 @@ def assign_chunks_to_stages() -> dict:
                                    payload={"plan_stages": [], "plan_substages": []}, points=[p.id])
                 touched += 1
                 continue
-            subs = [(stid, subid) for stid, subid, sv in sub_vecs if _cos(p.vector, sv) >= PLAN_STAGE_MATCH]
-            stages = {sid for sid, sv in stage_vecs if _cos(p.vector, sv) >= PLAN_STAGE_MATCH}
-            stages |= {stid for stid, _ in subs}   # этап выводится и из совпавших подэтапов
+            plan_stages, plan_substages = _stage_tags(p.vector)
             client.set_payload(collection_name=COLLECTION_NAME,
-                               payload={"plan_stages": sorted(stages),
-                                        "plan_substages": sorted({s for _, s in subs})},
+                               payload={"plan_stages": plan_stages, "plan_substages": plan_substages},
                                points=[p.id])
             touched += 1
         if offset is None:
@@ -859,12 +889,15 @@ def reanalyze_document(filename: str) -> dict:
                 if meaningful:
                     cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
                     chunk_prof = classify.chunk_profession(base_text, summary, doc_profession)
+                    plan_stages, plan_substages = _stage_tags(p.vector)
                 else:
                     cc = {"folders": [], "stage_ids": []}
                     chunk_prof = ""
+                    plan_stages, plan_substages = [], []
                 client.set_payload(collection_name=COLLECTION_NAME,
                                    payload={"meaningful": meaningful, "folders": cc["folders"],
-                                            "stage_ids": cc["stage_ids"], "profession": chunk_prof},
+                                            "stage_ids": cc["stage_ids"], "profession": chunk_prof,
+                                            "plan_stages": plan_stages, "plan_substages": plan_substages},
                                    points=[p.id])
                 touched += 1
             if offset is None:
