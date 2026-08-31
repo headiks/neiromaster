@@ -398,6 +398,15 @@ def index_document(filepath: Path) -> dict:
         return {"filename": filename, "status": "error", "error": str(e)}
 
 
+def _query_chunks(vector, query_filter, limit: int):
+    """Векторный поиск чанков в Qdrant с (опциональным) фильтром payload. Возвращает
+    список точек (у каждой .score и .payload). query_filter=None — без фильтра."""
+    return client.query_points(
+        collection_name=COLLECTION_NAME, query=vector, limit=limit,
+        with_payload=True, query_filter=query_filter,
+    ).points
+
+
 def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: int = 6,
                   plan_stage: Optional[str] = None, plan_substage: Optional[str] = None,
                   position: str = "") -> list:
