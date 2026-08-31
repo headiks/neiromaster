@@ -162,6 +162,28 @@
         .folder-card .chips { display:flex; flex-wrap:wrap; gap:4px; margin-top:8px; }
         .folder-card .chip { font-size:11px; background:#eef2ff; color:#3730a3; border-radius:6px; padding:1px 8px; }
         .folder-card .row-actions { display:flex; gap:6px; margin-top:10px; }
+        /* Этапы ↔ документы (встроенная доска, дизайн сайта) */
+        .stage-board { margin-top:14px; display:flex; flex-direction:column; gap:14px; }
+        .stg { border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,0.05); }
+        .stg-head { display:flex; align-items:center; gap:12px; padding:12px 16px; background:#f8fafc; border-bottom:1px solid #e2e8f0; }
+        .stg-n { width:26px; height:26px; flex:none; border-radius:7px; background:#eef2ff; color:#3730a3; display:grid; place-items:center; font-weight:700; font-size:13px; }
+        .stg-tt { font-weight:700; font-size:14px; color:#0f172a; }
+        .stg-dd { color:#64748b; font-size:12px; }
+        .stg-count { margin-left:auto; font-size:12px; font-weight:700; color:#7c3aed; background:#f3e8ff; padding:2px 8px; border-radius:6px; white-space:nowrap; }
+        .sub-r { display:grid; grid-template-columns:220px 1fr; gap:14px; padding:12px 16px; border-top:1px solid #eef2f7; }
+        .sub-r:first-child { border-top:0; }
+        .sub-t { font-weight:600; font-size:13px; color:#334155; }
+        .sub-c { color:#94a3b8; font-size:11px; margin-top:3px; }
+        .sub-docs { display:flex; flex-wrap:wrap; gap:8px; }
+        .bdoc { display:flex; gap:8px; align-items:flex-start; background:#f8fafc; border:1px solid #e2e8f0; border-radius:9px; padding:7px 10px; min-width:190px; max-width:260px; }
+        .bdoc .ext { width:26px; height:26px; flex:none; border-radius:6px; display:grid; place-items:center; color:#fff; font-size:9px; font-weight:700; }
+        .bdoc .ext.pdf{background:#d1493f}.bdoc .ext.docx{background:#2f5fe0}.bdoc .ext.xls{background:#1f8a54}.bdoc .ext.ppt{background:#d1712a}.bdoc .ext.gen{background:#64748b}
+        .bdoc .nm { font-weight:600; font-size:12px; color:#0f172a; line-height:1.25; word-break:break-word; }
+        .bdoc .sc { font-size:11px; color:#64748b; margin-top:3px; }
+        .stg.unassigned { border-color:#e6d3a3; }
+        .stg.unassigned .stg-head { background:#fef9ec; }
+        .stg.unassigned .stg-n { background:transparent; color:#9a6a10; }
+        .bempty { color:#94a3b8; font-size:12px; font-style:italic; align-self:center; }
         .section-head-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:32px; }
         .section-head-row .section-title { margin:0; }
         .chk-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px 14px; }
@@ -355,11 +377,17 @@
         <div class="stage-hint">Структурой знаний управляете вы. Папка — логическая категория (не хранит файлов): ассистент относит к ней документы по критериям. Удаление папки не удаляет документы.</div>
         <div class="folder-grid" id="folder-grid"><div class="empty-hint">Загрузка папок...</div></div>
 
+        <div class="section-head-row" style="margin-top:26px;">
+            <h2 class="section-title"><i data-lucide="layout-grid"></i> Этапы ↔ документы</h2>
+            <button class="ghost-btn" onclick="loadStageBoard()"><i data-lucide="refresh-cw"></i> Обновить</button>
+        </div>
+        <div class="stage-hint">Какие документы закреплены за этапами и подэтапами адаптации (привязка по смыслу). Данные из реестра метаданных.</div>
+        <div class="stage-board" id="stage-board"><div class="empty-hint">Загрузка структуры...</div></div>
+
         <div class="section-head-row" style="margin-top:34px;">
             <h2 class="section-title"><i data-lucide="file-text"></i> Документы</h2>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
                 <a class="ghost-btn" href="/documents-table"><i data-lucide="table"></i> Реестр (таблица)</a>
-                <a class="ghost-btn" href="/documents-board"><i data-lucide="layout-grid"></i> Этапы ↔ документы</a>
                 <button class="ghost-btn" onclick="assignChunksToStages()"><i data-lucide="layers"></i> Разложить чанки по этапам</button>
                 <button class="ghost-btn" onclick="reanalyzeAll()"><i data-lucide="refresh-cw"></i> Переанализировать всё</button>
             </div>
@@ -431,6 +459,7 @@
         <div class="toolbar" style="margin-top:24px;">
             <button class="primary-btn" onclick="savePlan()"><i data-lucide="save"></i> Сохранить план</button>
             <button class="primary-btn" id="generate-btn" onclick="generatePlan()"><i data-lucide="sparkles"></i> Сгенерировать ответы</button>
+            <button class="ghost-btn" id="cancel-gen-btn" onclick="cancelGeneration()" style="display:none;"><i data-lucide="x-circle"></i> Отменить генерацию</button>
             <span id="plan-status" style="color:#475569;font-size:14px;"></span>
         </div>
 
@@ -782,7 +811,51 @@
 
         function loadFolders() {
             return api('/folders').then(r => r.json())
-                .then(d => { allFolders = d.folders || []; renderFolders(); }).catch(() => {});
+                .then(d => { allFolders = d.folders || []; renderFolders(); loadStageBoard(); }).catch(() => {});
+        }
+
+        const BEXT = { pdf:'pdf', docx:'docx', doc:'docx', xls:'xls', xlsx:'xls', ppt:'ppt', pptx:'ppt' };
+        const BLABEL = { pdf:'PDF', docx:'DOCX', doc:'DOCX', xls:'XLSX', xlsx:'XLSX', ppt:'PPTX', pptx:'PPTX' };
+        function bDocCard(d) {
+            const ext = BEXT[(d.mime || '').toLowerCase()] || 'gen';
+            const lab = BLABEL[(d.mime || '').toLowerCase()] || ((d.mime || '').toUpperCase().slice(0, 4) || 'ФАЙЛ');
+            const sc = (d.score != null) ? `<div class="sc">уверенность ${Number(d.score).toFixed(2)}</div>` : '';
+            return `<div class="bdoc"><div class="ext ${ext}">${lab}</div><div><div class="nm">${escapeHtml(d.filename || '')}</div>${sc}</div></div>`;
+        }
+        function bCountDocs(s) { let n = (s.documents || []).length; (s.substages || []).forEach(x => n += (x.documents || []).length); return n; }
+        function renderStageBoard(b) {
+            const el = document.getElementById('stage-board');
+            if (!el) return;
+            let html = '';
+            (b.stages || []).forEach((s, i) => {
+                let rows = '';
+                (s.substages || []).forEach(sub => {
+                    rows += `<div class="sub-r"><div><div class="sub-t">${escapeHtml(sub.title || '')}</div><div class="sub-c">${(sub.documents || []).length} док.</div></div>`
+                          + `<div class="sub-docs">${(sub.documents || []).length ? sub.documents.map(bDocCard).join('') : '<div class="bempty">— нет документов —</div>'}</div></div>`;
+                });
+                if ((s.documents || []).length) {
+                    rows += `<div class="sub-r"><div><div class="sub-t">В этапе (без подэтапа)</div></div><div class="sub-docs">${s.documents.map(bDocCard).join('')}</div></div>`;
+                }
+                html += `<section class="stg"><header class="stg-head"><div class="stg-n">${i + 1}</div>`
+                      + `<div><div class="stg-tt">${escapeHtml(s.title || '')}</div><div class="stg-dd">${escapeHtml(s.description || '')}</div></div>`
+                      + `<span class="stg-count">${bCountDocs(s)} док.</span></header>${rows || '<div class="sub-r"><div class="bempty">нет подэтапов</div></div>'}</section>`;
+            });
+            if ((b.unassigned || []).length) {
+                html += `<section class="stg unassigned"><header class="stg-head"><div class="stg-n">?</div>`
+                      + `<div><div class="stg-tt">Без уверенной привязки</div><div class="stg-dd">Загружены, но не отнесены к этапу — проверьте вручную</div></div>`
+                      + `<span class="stg-count">${b.unassigned.length} док.</span></header>`
+                      + `<div class="sub-r"><div><div class="sub-t">Требует решения</div></div><div class="sub-docs">${b.unassigned.map(bDocCard).join('')}</div></div></section>`;
+            }
+            el.innerHTML = html || '<div class="empty-hint">Пока нет ни этапов, ни документов.</div>';
+            refreshIcons();
+        }
+        function loadStageBoard() {
+            const el = document.getElementById('stage-board');
+            if (!el) return;
+            api('/documents/board').then(r => r.ok ? r.json() : null).then(b => {
+                if (!b) { el.innerHTML = '<div class="empty-hint">Нет данных.</div>'; return; }
+                renderStageBoard(b);
+            }).catch(() => { el.innerHTML = '<div class="empty-hint">Не удалось загрузить структуру.</div>'; });
         }
 
         function renderFolders() {
@@ -1177,6 +1250,7 @@
         let plan = emptyPlan();
         let builderLoaded = false;
         let pollTimer = null;
+        let currentGenJob = null;
 
         function emptyPlan() {
             return { plan_id: null, title: '', role: '', start_date: '', stages: [] };
@@ -1616,6 +1690,8 @@
                     return;
                 }
                 setStatus('Генерация запущена');
+                currentGenJob = data.job_id;
+                document.getElementById('cancel-gen-btn').style.display = '';
                 pollJob(data.job_id);
             }).catch(err => {
                 setStatus(`${err.message}`);
@@ -1638,15 +1714,28 @@
                         ? `Подэтап ${job.done} из ${job.total}${job.current ? ' · ' + job.current : ''}${job.errors ? ' · ошибок: ' + job.errors : ''}`
                         : `Статус: ${job.status} · ${job.done} из ${job.total}${job.errors ? ' · ошибок: ' + job.errors : ''}`;
 
-                    if (job.status === 'done' || job.status === 'error') {
+                    if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
                         clearInterval(pollTimer);
+                        currentGenJob = null;
                         document.getElementById('generate-btn').disabled = false;
-                        setStatus(job.status === 'done' ? 'Генерация завершена' : `${job.error}`);
+                        document.getElementById('cancel-gen-btn').style.display = 'none';
+                        setStatus(job.status === 'done' ? 'Генерация завершена'
+                            : job.status === 'cancelled' ? 'Генерация отменена (сгенерированное сохранено)'
+                            : `${job.error}`);
                         loadScheduleIfAny();
                         refreshPlanList();
                     }
                 }).catch(() => clearInterval(pollTimer));
             }, 1500);
+        }
+
+        function cancelGeneration() {
+            if (!currentGenJob) return;
+            const btn = document.getElementById('cancel-gen-btn');
+            btn.disabled = true;
+            setStatus('Отмена…');
+            api(`/jobs/${encodeURIComponent(currentGenJob)}/cancel`, { method: 'POST' })
+                .finally(() => { btn.disabled = false; });
         }
 
         function loadScheduleIfAny() {

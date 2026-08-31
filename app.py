@@ -974,6 +974,15 @@ async def get_job(job_id: str):
     return job
 
 
+@app.post("/jobs/{job_id}/cancel", dependencies=admin_only)
+async def cancel_generation(job_id: str):
+    """Отмена фоновой генерации: уже сгенерированные подэтапы сохраняются, дальше не идём."""
+    job = planner.cancel_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    return job
+
+
 @app.get("/plans/{plan_id}/schedule", dependencies=admin_only)
 async def get_schedule(plan_id: str, profession: str | None = None):
     """Расписание плана. profession — показать вариант под конкретную должность (иначе общий)."""

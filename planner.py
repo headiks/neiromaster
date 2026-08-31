@@ -793,6 +793,18 @@ def get_job(job_id: str) -> Optional[dict]:
         return dict(job) if job else None
 
 
+def cancel_job(job_id: str) -> Optional[dict]:
+    """Помечает задачу генерации на отмену. Цикл run() увидит флаг перед следующим
+    подэтапом, сохранит уже сгенерированное и завершится статусом 'cancelled'."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return None
+        if job.get("status") in ("queued", "running"):
+            job["cancel"] = True
+        return dict(job)
+
+
 def start_generation(plan: dict, positions: Optional[list] = None) -> dict:
     """Запускает генерацию плана в фоне. positions — список уникальных должностей (из штатки):
     под КАЖДУЮ генерируется своё расписание (чанки её профессии + общие), сотрудники этой
@@ -825,7 +837,11 @@ def start_generation(plan: dict, positions: Optional[list] = None) -> dict:
             for prof in profs:
                 generated = {}
                 label = prof or "общее"
+                cancelled = False
                 for item in items:
+                    if (get_job(job_id) or {}).get("cancel"):   # запрошена отмена — стоп
+                        cancelled = True
+                        break
                     stage = stages_by_id.get(item["stage"]["id"], {})
                     substage = next(
                         (s for s in stage.get("substages", []) if s["id"] == item["substage"]["id"]),
@@ -839,7 +855,12 @@ def start_generation(plan: dict, positions: Optional[list] = None) -> dict:
                     generated[item["message_id"]] = payload
                     done += 1
                     _set_job(job_id, done=done, errors=errors)
-                save_schedule(plan["plan_id"], build_schedule(plan, generated, profession=prof), profession=prof)
+                if generated:   # сохраняем, что успели (частичное расписание не теряем)
+                    save_schedule(plan["plan_id"], build_schedule(plan, generated, profession=prof), profession=prof)
+                if cancelled:
+                    _set_job(job_id, status="cancelled", current=None,
+                             finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+                    return
             _set_job(job_id, status="done", current=None,
                      finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         except Exception as e:
