@@ -848,7 +848,6 @@ def index_all_documents(docs_dir: Optional[Path] = None, recreate: bool = False)
         if filepath.name not in _load_registry():
             _update_registry(
                 filepath.name,
-                filename=filepath.name,
                 size_bytes=filepath.stat().st_size,
                 uploaded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                 status="uploaded",
