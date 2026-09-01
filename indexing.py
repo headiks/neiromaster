@@ -463,7 +463,31 @@ def search_chunks(query_text: str, topic_slugs: Optional[list] = None, limit: in
 
 
 # ---------- Материализация «папок этапов»: раскладка чанков по этапам каталога ----------
-PLAN_STAGE_MATCH = 0.45   # cos чанк↔этап каталога: чанк относим к этапу (мульти-лейбл)
+PLAN_STAGE_MATCH = 0.45   # нижняя граница ПОКАЗА кандидата в обосновании (не привязки)
+# bge-m3 на русском даёт высокий «пол» косинуса (0.45–0.55 у любых двух текстов),
+# поэтому по абсолютному порогу документ цепляется к десяткам подэтапов. Привязку делаем
+# ОТНОСИТЕЛЬНОЙ: держим только подэтапы, близкие к лучшему для этого чанка, и не ниже пола.
+PLAN_SUBSTAGE_FLOOR = 0.52   # ниже — точно шум, не привязываем
+PLAN_SUBSTAGE_MARGIN = 0.05  # отставание от лучшего для чанка, дальше — обрыв
+PLAN_SUBSTAGE_TOPK = 3       # максимум подэтапов на чанк
+
+
+def _select_substages(scored):
+    """Из [(stage_id, sub_id, score)] оставляет только уверенные привязки чанка:
+    топ по score, в пределах MARGIN от лучшего и не ниже FLOOR, максимум TOPK.
+    Так один чанк ложится в 0–3 подэтапа, а не в половину каталога."""
+    scored = sorted(scored, key=lambda x: x[2], reverse=True)
+    if not scored or scored[0][2] < PLAN_SUBSTAGE_FLOOR:
+        return []
+    best = scored[0][2]
+    out = []
+    for stid, sub_id, sc in scored:
+        if sc < PLAN_SUBSTAGE_FLOOR or sc < best - PLAN_SUBSTAGE_MARGIN:
+            break
+        out.append((stid, sub_id, sc))
+        if len(out) >= PLAN_SUBSTAGE_TOPK:
+            break
+    return out
 
 
 def _cos(a, b) -> float:
@@ -500,12 +524,15 @@ def reset_stage_vectors():
 
 
 def _stage_tags(vec):
-    """(plan_stages[], plan_substages[]) для вектора чанка: подэтапы/этапы каталога,
-    к которым чанк близок (cos >= PLAN_STAGE_MATCH). Этап выводится и из совпавших подэтапов."""
-    sv, subv = _catalog_stage_vectors()
-    subs = [(stid, subid) for stid, subid, s in subv if _cos(vec, s) >= PLAN_STAGE_MATCH]
-    stages = {sid for sid, s in sv if _cos(vec, s) >= PLAN_STAGE_MATCH} | {stid for stid, _ in subs}
-    return sorted(stages), sorted({s for _, s in subs})
+    """(plan_stages[], plan_substages[]) для вектора чанка. Привязка ОТНОСИТЕЛЬНАЯ
+    (см. _select_substages): 0–3 самых близких подэтапа, а не всё подряд по порогу.
+    Этапы выводятся из принятых подэтапов."""
+    _, subv = _catalog_stage_vectors()
+    scored = [(stid, sub_id, _cos(vec, sv)) for stid, sub_id, sv in subv]
+    accepted = _select_substages(scored)
+    subs = sorted({s for _, s, _ in accepted})
+    stages = sorted({st for st, _, _ in accepted})
+    return stages, subs
 
 
 def assign_chunks_to_stages() -> dict:
@@ -642,14 +669,16 @@ def document_substage_map(filename: str) -> Optional[dict]:
         meaningful = pl.get("meaningful", True)
         matches = []
         if meaningful:
-            for stid, sub_id, sv in sub_vecs:
-                sc = _cos(p.vector, sv)
-                if sc >= PLAN_STAGE_MATCH:
+            scored = [(stid, sub_id, _cos(p.vector, sv)) for stid, sub_id, sv in sub_vecs]
+            accepted = {(st, sub) for st, sub, _ in _select_substages(scored)}   # реальные привязки
+            for stid, sub_id, sc in scored:
+                if sc >= PLAN_STAGE_MATCH:   # показываем и кандидатов — для ручной оценки
                     m = meta.get(sub_id, {})
                     matches.append({"substage_id": sub_id, "stage_id": stid,
                                     "stage_title": m.get("stage_title", ""), "title": m.get("title", ""),
-                                    "brief": m.get("brief", ""), "score": round(sc, 3)})
-            matches.sort(key=lambda x: x["score"], reverse=True)
+                                    "brief": m.get("brief", ""), "score": round(sc, 3),
+                                    "accepted": (stid, sub_id) in accepted})
+            matches.sort(key=lambda x: (x["accepted"], x["score"]), reverse=True)
         chunks.append({
             "chunk_index": pl.get("chunk_index"),
             "section": pl.get("section") or "",
