@@ -247,7 +247,7 @@ CLASSIFY_SYSTEM = """
 Не добавляй пояснений, только JSON.
 """
 
-def classify(question):
+def route_question(question):
     log("CLASSIFY", f"Классификация вопроса: {question}")
     # Быстрый префильтр для приветствий
     if is_greeting_or_general(question):
@@ -537,7 +537,7 @@ def handle_question(question, history=None, current_stage_ids=None, position=Non
     effective_question = resolved["standalone_question"]
     context_used = resolved["context_used"]
 
-    route_info = classify(effective_question)
+    route_info = route_question(effective_question)
     route = route_info["route"]
     log("HANDLE", f"Маршрут: {route}")
 
