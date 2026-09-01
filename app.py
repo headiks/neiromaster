@@ -29,6 +29,7 @@ import employees as adaptation
 import mailing
 import sender
 import documents
+import storage
 from indexing import DOCS_DIR
 
 
@@ -559,6 +560,18 @@ async def get_documents_table():
     return {"documents": documents.list_meta()}
 
 
+@app.get("/documents/{filename}/download", dependencies=admin_only)
+async def download_document(filename: str):
+    """Скачать оригинал из объектного хранилища по временной подписанной ссылке
+    (файлы приватные — прямого публичного URL нет)."""
+    row = documents.get_by_filename(filename)
+    if row is None or not row.get("storage_key"):
+        raise HTTPException(status_code=404, detail="Файл в хранилище не найден")
+    if not storage.configured():
+        raise HTTPException(status_code=503, detail="Хранилище не настроено")
+    return RedirectResponse(url=storage.presigned_url(row["storage_key"]), status_code=307)
+
+
 @app.post("/documents/{filename}/reindex", dependencies=admin_only)
 async def reindex_document(filename: str):
     """Переанализ документа (без повторного docling): обновляет папки/этапы по чанкам
@@ -592,8 +605,9 @@ async def upload_document(file: UploadFile = File(...)):
                             detail=f"Файл превышает лимит {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ")
 
     # Дедупликация по содержимому (sha256): тот же файл не грузим и не индексируем заново.
+    file_hash = documents.hash_bytes(content)
     try:
-        existing = documents.find_by_hash(documents.hash_bytes(content))
+        existing = documents.find_by_hash(file_hash)
     except Exception:
         existing = None   # реестр недоступен — не блокируем загрузку
     if existing:
@@ -607,6 +621,15 @@ async def upload_document(file: UploadFile = File(...)):
         filepath = indexing.save_uploaded_file(file.filename, content)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Durable-копия оригинала в объектном хранилище (S3/Timeweb). Ключ детерминирован
+    # (documents/<hash>/<имя>), тот же, что проставит documents.record при индексации.
+    if storage.configured():
+        try:
+            storage.put(storage.object_key(file_hash, filepath.name), content,
+                        content_type=file.content_type)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Не удалось сохранить файл в хранилище: {e}")
 
     job = indexing.enqueue_document(filepath)
     return JSONResponse(status_code=202, content=job)
@@ -675,6 +698,13 @@ async def get_document_chunks(filename: str):
 @app.delete("/documents/{filename}", dependencies=admin_only)
 async def remove_document(filename: str):
     """Удаляет документ: векторы из Qdrant, оригинал из data/documents, кэш docling."""
+    # Забираем storage_key ДО удаления строки — чтобы снести файл и из S3.
+    try:
+        row = next((d for d in documents.list_meta() if d.get("filename") == filename), None)
+        key = row.get("storage_key") if row else None
+    except Exception:
+        key = None
+
     existed = indexing.delete_document(filename)
     if not existed:
         raise HTTPException(status_code=404, detail="Документ не найден")
@@ -682,6 +712,11 @@ async def remove_document(filename: str):
         documents.remove_by_filename(filename)
     except Exception:
         pass
+    if key and storage.configured():
+        try:
+            storage.delete(key)
+        except Exception:
+            pass   # файл в S3 не критично оставить — метаданные уже удалены
     return {"filename": filename, "deleted": True}
 
 

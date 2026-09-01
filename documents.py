@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     folders      TEXT[],
     stage_ids    TEXT[],
     substages    JSONB DEFAULT '[]'::jsonb,
+    storage_key  TEXT,
     updated_at   TEXT
 )
 """
@@ -185,6 +186,8 @@ def init():
     import db
     db.execute(CREATE_TABLE)
     db.execute(CREATE_INDEX)
+    # Для уже существующих таблиц — добавляем недостающие колонки (миграция на месте).
+    db.execute(f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS storage_key TEXT")
 
 
 def find_by_hash(sha256: str) -> Optional[dict]:
@@ -199,6 +202,11 @@ def get(sha256: str) -> Optional[dict]:
     return db.query(f"SELECT * FROM {TABLE} WHERE sha256 = %s", (sha256,), "one")
 
 
+def get_by_filename(filename: str) -> Optional[dict]:
+    import db
+    return db.query(f"SELECT * FROM {TABLE} WHERE filename = %s", (filename,), "one")
+
+
 def list_docs() -> list:
     import db
     return db.query(f"SELECT * FROM {TABLE} ORDER BY uploaded_at DESC NULLS LAST", (), "all")
@@ -210,7 +218,7 @@ def list_meta() -> list:
     import db
     return db.query(
         f"""SELECT sha256, filename, size_bytes, mime, status, uploaded_at, uploaded_by,
-                   summary, keywords, folders, stage_ids, substages, updated_at,
+                   summary, keywords, folders, stage_ids, substages, storage_key, updated_at,
                    array_length(embedding, 1) AS embedding_dim
             FROM {TABLE} ORDER BY uploaded_at DESC NULLS LAST""", (), "all")
 
@@ -251,13 +259,14 @@ def hash_bytes(content: bytes) -> str:
 _UPSERT = f"""
 INSERT INTO {TABLE}
     (sha256, filename, size_bytes, mime, status, uploaded_at, uploaded_by,
-     summary, keywords, embedding, folders, stage_ids, substages, updated_at)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+     summary, keywords, embedding, folders, stage_ids, substages, storage_key, updated_at)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 ON CONFLICT (sha256) DO UPDATE SET
     filename=EXCLUDED.filename, size_bytes=EXCLUDED.size_bytes, mime=EXCLUDED.mime,
     status=EXCLUDED.status, uploaded_at=EXCLUDED.uploaded_at, uploaded_by=EXCLUDED.uploaded_by,
     summary=EXCLUDED.summary, keywords=EXCLUDED.keywords, embedding=EXCLUDED.embedding,
     folders=EXCLUDED.folders, stage_ids=EXCLUDED.stage_ids, substages=EXCLUDED.substages,
+    storage_key=COALESCE(EXCLUDED.storage_key, {TABLE}.storage_key),
     updated_at=EXCLUDED.updated_at
 """
 
@@ -271,7 +280,8 @@ def upsert(meta: dict) -> dict:
         meta.get("status", "indexed"), meta.get("uploaded_at"), meta.get("uploaded_by"),
         meta.get("summary"), meta.get("keywords") or [], meta.get("embedding"),
         meta.get("folders") or [], meta.get("stage_ids") or [],
-        Json(meta.get("substages") or []), time.strftime("%Y-%m-%dT%H:%M:%S"),
+        Json(meta.get("substages") or []), meta.get("storage_key"),
+        time.strftime("%Y-%m-%dT%H:%M:%S"),
     ))
     return get(meta["sha256"])
 
@@ -339,6 +349,7 @@ def record(sha256: str, filename: str, summary: str, folders: list, stage_ids: l
     подэтапам (Вариант 1) и ключевые слова — и сохраняем строку.
     """
     from config import get_embedding
+    import storage
     doc_vec = get_embedding(summary or filename)
     subs = assign_substages(doc_vec, _substage_vectors(stage_ids or None))
     return upsert({
@@ -347,6 +358,7 @@ def record(sha256: str, filename: str, summary: str, folders: list, stage_ids: l
         "uploaded_by": uploaded_by, "summary": summary,
         "keywords": extract_keywords(summary), "embedding": doc_vec,
         "folders": folders or [], "stage_ids": stage_ids or [], "substages": subs,
+        "storage_key": storage.object_key(sha256, filename),   # где файл лежит в S3
     })
 
 
@@ -355,6 +367,32 @@ def board() -> dict:
     """Данные для экрана: этапы/подэтапы и относящиеся к ним документы + без привязки."""
     import stages as stages_mod
     return build_board(stages_mod.list_stages(), list_docs())
+
+
+# ---------- Разовая миграция локальных оригиналов в S3 ----------
+def migrate_local_to_s3() -> dict:
+    """
+    Заливает в объектное хранилище оригиналы документов, которые были загружены ДО
+    подключения S3 и лежат ещё локально в data/documents/. Проставляет storage_key.
+    Возвращает {"uploaded": N, "skipped": M, "missing": K}. Идемпотентно (уже
+    залитые пропускает). Нужны настроенный S3 и доступ к локальным файлам.
+    """
+    import db, storage
+    from config import DOCS_DIR
+    uploaded = skipped = missing = 0
+    for row in db.query(f"SELECT sha256, filename FROM {TABLE}", (), "all"):
+        key = storage.object_key(row["sha256"], row["filename"])
+        if storage.exists(key):
+            skipped += 1
+            continue
+        path = DOCS_DIR / row["filename"]
+        if not path.exists():
+            missing += 1
+            continue
+        storage.put(key, path.read_bytes())
+        db.execute(f"UPDATE {TABLE} SET storage_key=%s WHERE sha256=%s", (key, row["sha256"]))
+        uploaded += 1
+    return {"uploaded": uploaded, "skipped": skipped, "missing": missing}
 
 
 # ---------- Разовое наполнение из старого registry.json ----------
