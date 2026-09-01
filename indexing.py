@@ -980,7 +980,10 @@ def reanalyze_document(filename: str) -> dict:
                 meaningful = classify.is_meaningful(base_text)
                 if meaningful:
                     cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
-                    chunk_prof = classify.chunk_profession(base_text, summary, doc_profession)
+                    # Профессия чанка проставлена при индексации и стабильна — не гоняем LLM
+                    # на каждый чанк (это делало переанализ 78-чанкового документа многочасовым).
+                    # Переанализ реагирует на изменения папок/каталога — это векторные операции.
+                    chunk_prof = (p.payload or {}).get("profession") or ""
                     plan_stages, plan_substages = _stage_tags(p.vector)
                 else:
                     cc = {"folders": [], "stage_ids": []}
