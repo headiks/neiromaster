@@ -184,6 +184,20 @@
         .stg.unassigned .stg-head { background:#fef9ec; }
         .stg.unassigned .stg-n { background:transparent; color:#9a6a10; }
         .bempty { color:#94a3b8; font-size:12px; font-style:italic; align-self:center; }
+        .bdoc { cursor:pointer; transition:border-color .15s; }
+        .bdoc:hover { border-color:#7c3aed; }
+        /* Модалка «куски по подэтапам» */
+        .smap-chunk { border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; margin-bottom:10px; background:#fff; }
+        .smap-chunk.smap-junk { opacity:.6; }
+        .smap-sec { font-size:11px; color:#94a3b8; margin-bottom:6px; }
+        .smap-chunk .txt { font-size:13px; color:#334155; line-height:1.45; white-space:pre-wrap; }
+        .smap-subs { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+        .smap-chip { font-size:12px; border-radius:6px; padding:3px 9px; border:1px solid transparent; }
+        .smap-chip.hi { background:#dcfce7; color:#14532d; border-color:#86efac; }
+        .smap-chip.mid { background:#fef9c3; color:#713f12; border-color:#fde68a; }
+        .smap-chip.lo { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
+        .smap-chip small { opacity:.75; font-weight:700; }
+        .smap-none { font-size:12px; color:#94a3b8; font-style:italic; margin-top:6px; }
         .section-head-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:32px; }
         .section-head-row .section-title { margin:0; }
         .chk-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px 14px; }
@@ -579,6 +593,15 @@
         <div id="doc-detail-body" style="margin-top:12px;max-height:72vh;overflow:auto;"></div>
     </dialog>
 
+    <dialog id="substage-map-dialog" style="max-width:920px;width:94vw;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+            <h3 style="margin:0;" id="substage-map-title">Куски документа по подэтапам</h3>
+            <button class="ghost-btn" onclick="document.getElementById('substage-map-dialog').close()">Закрыть</button>
+        </div>
+        <div class="stage-hint" style="margin-top:8px;">Каждый кусок текста показан с подэтапами, к которым он отнесён, и уверенностью (косинус к смыслу подэтапа). Низкая уверенность → вероятно, попал ошибочно.</div>
+        <div id="substage-map-body" style="margin-top:12px;max-height:74vh;overflow:auto;"></div>
+    </dialog>
+
     <dialog id="folder-dialog" style="max-width:620px;width:92vw;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
             <h3 style="margin:0;" id="folder-dialog-title">Новая папка</h3>
@@ -814,7 +837,7 @@
             const ext = BEXT[(d.mime || '').toLowerCase()] || 'gen';
             const lab = BLABEL[(d.mime || '').toLowerCase()] || ((d.mime || '').toUpperCase().slice(0, 4) || 'ФАЙЛ');
             const sc = (d.score != null) ? `<div class="sc">уверенность ${Number(d.score).toFixed(2)}</div>` : '';
-            return `<div class="bdoc"><div class="ext ${ext}">${lab}</div><div><div class="nm">${escapeHtml(d.filename || '')}</div>${sc}</div></div>`;
+            return `<div class="bdoc" data-fn="${escapeHtml(d.filename || '')}" onclick="openSubstageMap(this.dataset.fn)" title="Показать куски текста и критерий попадания"><div class="ext ${ext}">${lab}</div><div><div class="nm">${escapeHtml(d.filename || '')}</div>${sc}</div></div>`;
         }
         function bCountDocs(s) { let n = (s.documents || []).length; (s.substages || []).forEach(x => n += (x.documents || []).length); return n; }
         function renderStageBoard(b) {
@@ -850,6 +873,32 @@
                 if (!b) { el.innerHTML = '<div class="empty-hint">Нет данных.</div>'; return; }
                 renderStageBoard(b);
             }).catch(() => { el.innerHTML = '<div class="empty-hint">Не удалось загрузить структуру.</div>'; });
+        }
+
+        function smapClass(s) { return s >= 0.6 ? 'hi' : (s >= 0.5 ? 'mid' : 'lo'); }
+        function openSubstageMap(filename) {
+            if (!filename) return;
+            const dlg = document.getElementById('substage-map-dialog');
+            document.getElementById('substage-map-title').textContent = 'Куски документа: ' + filename;
+            const body = document.getElementById('substage-map-body');
+            body.innerHTML = '<div class="empty-hint">Загрузка…</div>';
+            dlg.showModal();
+            api(`/documents/${encodeURIComponent(filename)}/substage-map`).then(r => r.ok ? r.json() : null).then(d => {
+                if (!d || !(d.chunks || []).length) { body.innerHTML = '<div class="empty-hint">Нет данных по кускам текста.</div>'; return; }
+                body.innerHTML = d.chunks.map((c, i) => {
+                    const sec = `Кусок ${i + 1}${c.section ? ' · ' + escapeHtml(c.section) : ''}${c.page != null ? ' · стр. ' + c.page : ''}`;
+                    if (c.meaningful === false) {
+                        return `<div class="smap-chunk smap-junk"><div class="smap-sec">${sec} · служебный текст (в подэтапы не идёт)</div>`
+                             + `<div class="txt">${escapeHtml((c.text || '').slice(0, 400))}</div></div>`;
+                    }
+                    const chips = (c.matches || []).map(m =>
+                        `<span class="smap-chip ${smapClass(m.score)}" title="Критерий подэтапа: ${escapeHtml(m.brief || '—')}">`
+                        + `${escapeHtml(m.stage_title)} → ${escapeHtml(m.title)} <small>${Number(m.score).toFixed(2)}</small></span>`).join('');
+                    const subs = chips ? `<div class="smap-subs">${chips}</div>` : '<div class="smap-none">— ни одному подэтапу не соответствует —</div>';
+                    return `<div class="smap-chunk"><div class="smap-sec">${sec}</div>`
+                         + `<div class="txt">${escapeHtml((c.text || '').slice(0, 600))}</div>${subs}</div>`;
+                }).join('');
+            }).catch(() => { body.innerHTML = '<div class="empty-hint">Ошибка загрузки.</div>'; });
         }
 
         function renderFolders() {

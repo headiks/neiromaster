@@ -607,6 +607,61 @@ def get_document_chunks(filename: str) -> Optional[dict]:
     return {"filename": filename, "chunks": chunks, "count": len(chunks)}
 
 
+def document_substage_map(filename: str) -> Optional[dict]:
+    """Разбивка документа по подэтапам с ОБОСНОВАНИЕМ: для каждого содержательного чанка —
+    к каким подэтапам он отнесён и НАСКОЛЬКО близок (косинус к «запросу подэтапа» каталога).
+    Score — и есть критерий: чем выше, тем увереннее; низкий у пункта → вероятно, попал ошибочно.
+    Возвращает {filename, chunks:[{chunk_index, section, page, text, meaningful,
+    matches:[{substage_id, stage_id, stage_title, title, brief, score}]}]}."""
+    import planner
+    cat = planner.load_catalog()
+    meta = {}   # sub_id -> подписи для UI
+    for st in cat.get("stages") or []:
+        for sub in st.get("substage_templates") or []:
+            meta[sub["id"]] = {"stage_id": st["id"], "stage_title": st.get("title", ""),
+                               "title": sub.get("title", ""), "brief": sub.get("brief", "")}
+    _, sub_vecs = _catalog_stage_vectors()   # [(stage_id, sub_id, vec)]
+
+    points = []
+    offset = None
+    while True:
+        batch, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=filename))]),
+            limit=256, with_payload=True, with_vectors=True, offset=offset,
+        )
+        points.extend(batch)
+        if offset is None:
+            break
+    if not points:
+        return None
+
+    chunks = []
+    for p in points:
+        pl = p.payload or {}
+        meaningful = pl.get("meaningful", True)
+        matches = []
+        if meaningful:
+            for stid, sub_id, sv in sub_vecs:
+                sc = _cos(p.vector, sv)
+                if sc >= PLAN_STAGE_MATCH:
+                    m = meta.get(sub_id, {})
+                    matches.append({"substage_id": sub_id, "stage_id": stid,
+                                    "stage_title": m.get("stage_title", ""), "title": m.get("title", ""),
+                                    "brief": m.get("brief", ""), "score": round(sc, 3)})
+            matches.sort(key=lambda x: x["score"], reverse=True)
+        chunks.append({
+            "chunk_index": pl.get("chunk_index"),
+            "section": pl.get("section") or "",
+            "page": pl.get("page"),
+            "meaningful": meaningful,
+            "text": pl.get("raw_text") or pl.get("text") or "",
+            "matches": matches,
+        })
+    chunks.sort(key=lambda c: (c["chunk_index"] is None, c["chunk_index"] or 0))
+    return {"filename": filename, "threshold": PLAN_STAGE_MATCH, "chunks": chunks, "count": len(chunks)}
+
+
 def get_folder_chunks(slug: str, limit: int = 1000) -> dict:
     """Чанки, отнесённые к смысловой папке (payload.folders содержит slug) — для просмотра
     содержимого папки в админке. Векторы не тянем (для просмотра не нужны, легче ответ).

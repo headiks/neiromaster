@@ -568,6 +568,16 @@ async def get_documents_table():
     return {"documents": documents.list_meta()}
 
 
+@app.get("/documents/{filename}/substage-map", dependencies=admin_only)
+async def get_document_substage_map(filename: str):
+    """Разбивка документа по подэтапам: какие куски текста к каким подэтапам отнесены и
+    с какой уверенностью (косинус) — критерий попадания. Низкий score выдаёт ошибочные."""
+    data = indexing.document_substage_map(filename)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Чанки документа не найдены")
+    return data
+
+
 @app.post("/documents/{filename}/reindex", dependencies=admin_only)
 async def reindex_document(filename: str):
     """Переанализ документа (без повторного docling): обновляет папки/этапы по чанкам
