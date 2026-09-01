@@ -372,16 +372,9 @@
 
         <div class="section-head-row">
             <h2 class="section-title"><i data-lucide="folders"></i> Смысловые папки</h2>
-            <button class="ghost-btn" onclick="openFolderDialog()"><i data-lucide="folder-plus"></i> Новая папка</button>
-        </div>
-        <div class="stage-hint">Структурой знаний управляете вы. Папка — логическая категория (не хранит файлов): ассистент относит к ней документы по критериям. Удаление папки не удаляет документы.</div>
-        <div class="folder-grid" id="folder-grid"><div class="empty-hint">Загрузка папок...</div></div>
-
-        <div class="section-head-row" style="margin-top:26px;">
-            <h2 class="section-title"><i data-lucide="layout-grid"></i> Этапы ↔ документы</h2>
             <button class="ghost-btn" onclick="loadStageBoard()"><i data-lucide="refresh-cw"></i> Обновить</button>
         </div>
-        <div class="stage-hint">Какие документы закреплены за этапами и подэтапами адаптации (привязка по смыслу). Данные из реестра метаданных.</div>
+        <div class="stage-hint">Этапы и подэтапы адаптации и закреплённые за ними документы (привязка по смыслу). Данные из реестра метаданных.</div>
         <div class="stage-board" id="stage-board"><div class="empty-hint">Загрузка структуры...</div></div>
 
         <div class="section-head-row" style="margin-top:34px;">
@@ -642,6 +635,7 @@
                 if (tab.dataset.tab === 'builder') ensureBuilderLoaded();
                 if (tab.dataset.tab === 'employees') ensureEmployeesLoaded();
                 if (tab.dataset.tab === 'questions') loadQuestions();
+                if (tab.dataset.tab === 'docs') loadStageBoard();
             });
         });
 
@@ -859,6 +853,7 @@
         }
 
         function renderFolders() {
+            if (!folderGrid) return;   // сетка папок убрана из UI — рендерить некуда
             if (!allFolders.length) {
                 folderGrid.innerHTML = `<div class="empty-hint">Папок пока нет — создайте первую.</div>`;
                 return;
