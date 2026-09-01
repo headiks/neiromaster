@@ -335,17 +335,18 @@ def _llm_confirm_chunk_folders(text: str, cand_slugs: list, by_slug: dict) -> li
         return list(cand_slugs)
 
 
-def classify_chunk(text: str, doc_folders: list, vec=None) -> dict:
+def classify_chunk(text: str, doc_folders: list, vec=None, confirm: bool = True) -> dict:
     """Метки папок для отдельного чанка. Двухступенчато: эмбеддинг предлагает кандидатов
     (в пределах папок документа), большая модель подтверждает соответствие критериям.
     vec — уже посчитанный вектор чанка (чтобы не эмбеддить повторно при индексации).
-    Чанк без подходящей папки остаётся без меток — найдётся только в общей базе «Все
-    документы», но не подмешается в чужую папку при фильтрованном поиске."""
+    confirm=False — пропустить LLM-подтверждение (векторные кандидаты как есть): нужно для
+    переанализа, где иначе на КАЖДЫЙ чанк идёт вызов модели (документ на 78 чанков —
+    десятки минут). Чанк без подходящей папки остаётся без меток."""
     matches = (match_folders_by_vector(vec, top_k=5, threshold=CHUNK_MATCH_THRESHOLD)
                if vec is not None else match_folders(text, top_k=5, threshold=CHUNK_MATCH_THRESHOLD))
     cand = select_chunk_folders(matches, doc_folders)
     by_slug = {f["slug"]: f for f in folders.list_folders(include_disabled=False)}
-    chunk_folders = _llm_confirm_chunk_folders(text, cand, by_slug) if (cand and CHUNK_LLM_CONFIRM) else cand
+    chunk_folders = _llm_confirm_chunk_folders(text, cand, by_slug) if (cand and confirm and CHUNK_LLM_CONFIRM) else cand
     return {"folders": chunk_folders, "stage_ids": _stage_union(chunk_folders, by_slug)}
 
 

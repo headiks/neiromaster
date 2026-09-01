@@ -965,7 +965,9 @@ def reanalyze_document(filename: str) -> dict:
         summary = (entry or {}).get("summary") or ""
         doc_cls = classify.classify_document(summary) if summary else {"folders": [], "stage_ids": []}
         doc_folders = doc_cls["folders"]
-        doc_profession = classify.detect_profession(summary) if summary else ""
+        # Профессия документа стабильна (задана при индексации) — берём из реестра, не гоняем
+        # LLM. Переанализ реагирует на изменения ПАПОК/каталога, а не на профессию.
+        doc_profession = (entry or {}).get("profession") or ""
 
         offset = None
         touched = 0
@@ -979,7 +981,7 @@ def reanalyze_document(filename: str) -> dict:
                 base_text = (p.payload or {}).get("raw_text") or (p.payload or {}).get("text") or ""
                 meaningful = classify.is_meaningful(base_text)
                 if meaningful:
-                    cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector)
+                    cc = classify.classify_chunk(base_text, doc_folders, vec=p.vector, confirm=False)
                     # Профессия чанка проставлена при индексации и стабильна — не гоняем LLM
                     # на каждый чанк (это делало переанализ 78-чанкового документа многочасовым).
                     # Переанализ реагирует на изменения папок/каталога — это векторные операции.
